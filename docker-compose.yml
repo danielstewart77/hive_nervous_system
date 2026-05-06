@@ -1,0 +1,29 @@
+services:
+  lucent:
+    build: .
+    container_name: hive-lucent
+    restart: unless-stopped
+    networks:
+      # Join hive_mind's network so its containers can reach us as `hive-lucent:8424`.
+      - hivemind
+    ports:
+      # Host-side bind for direct curl/debugging and for Skippy (bare-metal,
+      # not on the hivemind docker network). Container-internal listeners
+      # come in via the `hivemind` network on port 8424.
+      - "127.0.0.1:8425:8424"
+    environment:
+      LUCENT_API_PORT: "8424"
+      LUCENT_DB_PATH: "/data/lucent.db"
+      PRUNE_LOG_PATH: "/data/prune.log"
+      PRUNE_CRON: "0 4 * * *"
+      PRUNE_TIMEZONE: "America/Chicago"
+      # LUCENT_BEARER_TOKEN — bind-mount or set via .env (F9)
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+
+networks:
+  hivemind:
+    external: true
+    name: hivemind
