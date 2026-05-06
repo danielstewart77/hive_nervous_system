@@ -58,6 +58,14 @@ Every write must populate `agent_id` with the **canonical mind id** — for regi
 
 `LUCENT_BEARER_TOKEN` env var on the container. Empty value = bypass mode with a startup warning (deployment safety so a fresh container doesn't lock the operator out before the token is set). Once set, validation is enforced; unauthenticated requests get 401.
 
+## Documentation
+
+The full design, implementation playbook, and verifiable requirements live under [`docs/`](./docs):
+
+- **[Design](./docs/memory-system-design.md)** — mind-agnostic architecture: rotation, four-layer bootstrap, capture pipeline, pruning, graph query semantics. Read this first.
+- **[Implementation](./docs/memory-system-implementation.md)** — adopter playbook. How a mind plugs into the shared service: env, identity convention, hooks per harness, verification checklist, "Constraints (don't relearn)".
+- **[Requirements](./docs/memory-system-requirements.md)** — 84 verifiable requirements across 15 sections, each with a verification method.
+
 ## Pruning
 
 APScheduler in-process, default `0 4 * * * America/Chicago`. Override via `PRUNE_CRON` and `PRUNE_TIMEZONE`. Per-class strategies live in `core/prune_memory.py`:
