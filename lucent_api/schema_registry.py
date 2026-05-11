@@ -44,6 +44,14 @@ SCHEMA_TYPES: dict[str, dict] = {
         "optional": [],
         "enums": {},
     },
+    "Device": {
+        "kind": "first-class",
+        "required": ["name", "kind"],
+        "optional": ["purpose", "as_of"],
+        "enums": {
+            "kind": ["phone", "laptop", "desktop", "server", "workstation", "tablet", "iot"],
+        },
+    },
     # ---- Person facets ----
     "ContactMethod": {
         "kind": "second-class",
@@ -120,6 +128,19 @@ SCHEMA_TYPES: dict[str, dict] = {
         "kind": "second-class",
         "required": ["text"],
         "optional": ["as_of"],
+        "enums": {},
+    },
+    # ---- Device facets ----
+    "OS": {
+        "kind": "second-class",
+        "required": ["name"],
+        "optional": ["version", "as_of"],
+        "enums": {},
+    },
+    "Software": {
+        "kind": "second-class",
+        "required": ["name"],
+        "optional": ["purpose", "as_of"],
         "enums": {},
     },
 }
@@ -243,6 +264,31 @@ SCHEMA_EDGES: dict[str, dict] = {
         "target_type": "SoulValue",
         "required_attrs": [],
         "optional_attrs": [],
+        "enums": {},
+        "symmetric": False,
+    },
+    # ---- Device edges ----
+    "OWNS": {
+        "source_type": "Person",
+        "target_type": "Device",
+        "required_attrs": [],
+        "optional_attrs": ["since"],
+        "enums": {},
+        "symmetric": False,
+    },
+    "RUNS": {
+        "source_type": "Device",
+        "target_type": "OS",
+        "required_attrs": [],
+        "optional_attrs": ["since"],
+        "enums": {},
+        "symmetric": False,
+    },
+    "HAS_INSTALLED": {
+        "source_type": "Device",
+        "target_type": "Software",
+        "required_attrs": [],
+        "optional_attrs": ["since"],
         "enums": {},
         "symmetric": False,
     },
