@@ -65,6 +65,24 @@ def _get_conn():
     return _get_connection()
 
 
+def _decode_embedding(raw) -> np.ndarray | None:
+    """Decode a stored embedding to float32 ndarray.
+
+    Tolerates legacy rows where the column was written as a JSON-encoded
+    string (e.g. '[0.025, 0.013, ...]') instead of the canonical
+    np.float32 .tobytes() blob. Returns None if the value is unusable.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return np.frombuffer(bytes(raw), dtype=np.float32)
+    if isinstance(raw, str):
+        try:
+            return np.array(json.loads(raw), dtype=np.float32)
+        except (ValueError, TypeError):
+            return None
+    return None
+
 
 def _nearest_neighbour(
     embedding: np.ndarray,
@@ -89,9 +107,9 @@ def _nearest_neighbour(
     best_id: int | None = None
     best_score = -1.0
     for row in rows:
-        if row["embedding"] is None:
+        emb = _decode_embedding(row["embedding"])
+        if emb is None:
             continue
-        emb = np.frombuffer(row["embedding"], dtype=np.float32)
         norm_e = float(np.linalg.norm(emb))
         if norm_e == 0:
             continue
@@ -504,9 +522,9 @@ def memory_retrieve(
         # Compute cosine similarity
         scored_memories = []
         for row in rows:
-            if row["embedding"] is None:
+            emb = _decode_embedding(row["embedding"])
+            if emb is None:
                 continue
-            emb = np.frombuffer(row["embedding"], dtype=np.float32)
             # Cosine similarity
             dot = np.dot(query_embedding, emb)
             norm_q = np.linalg.norm(query_embedding)

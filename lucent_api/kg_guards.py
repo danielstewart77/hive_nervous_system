@@ -59,19 +59,21 @@ def check_disambiguation(
     """
     # NOTE: entity_type is intentionally omitted from the SQL WHERE clause.
     # Disambiguation must check across all node types to catch cross-entity
-    # duplicates (e.g. "Hive Mind" as both a Project and a System). The
-    # parameter is retained in the signature for API consistency with
-    # graph_upsert and for potential future label-scoped queries.
+    # duplicates (e.g. "Hive Mind" as both a Project and a System).
+    # agent_id is also omitted (REQ-018): it is provenance only, not a query
+    # filter. Disambiguation is cross-mind so any mind catches duplicates
+    # written by any other mind. The parameter is retained for API
+    # consistency.
+    del agent_id  # intentionally unused
     conn = _get_connection()
     cursor = conn.execute(
         """
         SELECT name, type, id FROM nodes
-        WHERE agent_id = ?
-          AND (LOWER(name) = LOWER(?)
+        WHERE (LOWER(name) = LOWER(?)
                OR LOWER(name) LIKE '%' || LOWER(?) || '%'
                OR LOWER(?) LIKE '%' || LOWER(name) || '%')
         """,
-        (agent_id, name, name, name),
+        (name, name, name),
     )
     rows = [
         {"name": row["name"], "labels": [row["type"]], "id": row["id"]}

@@ -15,9 +15,10 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 import requests
-from core.memory_schema import build_metadata, validate_source
+from core.memory_schema import validate_source
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +107,16 @@ def graph_upsert_direct(
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
-        try:
-            meta = build_metadata(data_class=data_class, source=source, as_of=as_of)
-        except ValueError as e:
-            return json.dumps({"error": str(e)})
+        # KG nodes are not vector memories; data_class here is provenance only,
+        # not validated against the four-class memory registry. The KG's own
+        # entity types (Person, Agent, Memory) live in the `type` column.
+        meta = {
+            "data_class": data_class or "",
+            "tier": "contextual",
+            "as_of": as_of or datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "superseded": False,
+        }
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
@@ -127,72 +134,96 @@ def graph_upsert_direct(
         first_name = props.pop("first_name", None)
         last_name = props.pop("last_name", None)
 
-        # Upsert the node
-        cursor = conn.execute(
-            """
-            INSERT INTO nodes (agent_id, type, name, first_name, last_name,
-                               properties, data_class, tier, source, as_of,
-                               created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(agent_id, name) DO UPDATE SET
-                type = excluded.type,
-                properties = excluded.properties,
-                data_class = excluded.data_class,
-                tier = excluded.tier,
-                source = excluded.source,
-                as_of = excluded.as_of,
-                updated_at = excluded.updated_at,
-                first_name = COALESCE(excluded.first_name, nodes.first_name),
-                last_name = COALESCE(excluded.last_name, nodes.last_name)
-            """,
-            (
-                agent_id, label, name, first_name, last_name,
-                json.dumps(props), meta.get("data_class"), meta.get("tier"),
-                meta.get("source", source), meta.get("as_of"),
-                props["created_at"], props["created_at"],
-            ),
-        )
-        conn.commit()
-
-        # Get the node id
-        row = conn.execute(
-            "SELECT id FROM nodes WHERE agent_id = ? AND name = ?",
-            (agent_id, name),
+        # No DB-level uniqueness on name/type — disambiguation is a
+        # pre-write check (kg_guards.check_disambiguation). Find first,
+        # then UPDATE existing or INSERT new.
+        existing = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (name, label),
         ).fetchone()
-        node_id = row["id"] if row else cursor.lastrowid
+        if existing:
+            node_id = existing["id"]
+            conn.execute(
+                """
+                UPDATE nodes SET
+                    properties = ?,
+                    data_class = ?,
+                    tier = ?,
+                    source = ?,
+                    as_of = ?,
+                    updated_at = ?,
+                    first_name = COALESCE(?, first_name),
+                    last_name = COALESCE(?, last_name)
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(props), meta.get("data_class"), meta.get("tier"),
+                    meta.get("source", source), meta.get("as_of"),
+                    props["created_at"], first_name, last_name, node_id,
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO nodes (agent_id, type, name, first_name, last_name,
+                                   properties, data_class, tier, source, as_of,
+                                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    agent_id, label, name, first_name, last_name,
+                    json.dumps(props), meta.get("data_class"), meta.get("tier"),
+                    meta.get("source", source), meta.get("as_of"),
+                    props["created_at"], props["created_at"],
+                ),
+            )
+            node_id = cursor.lastrowid
+        conn.commit()
 
         rel_created = False
         if relation and target_name:
             rel_type = _validate_relation(relation)
             tgt_label = _validate_label(target_type or entity_type)
 
-            # Upsert target node
-            conn.execute(
-                """
-                INSERT INTO nodes (agent_id, type, name, properties, data_class, tier,
-                                   source, as_of, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(agent_id, name) DO UPDATE SET
-                    data_class = excluded.data_class,
-                    tier = excluded.tier,
-                    source = excluded.source,
-                    as_of = excluded.as_of,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    agent_id, tgt_label, target_name, json.dumps(meta),
-                    meta.get("data_class"), meta.get("tier"),
-                    meta.get("source", source), meta.get("as_of"),
-                    props["created_at"], props["created_at"],
-                ),
-            )
-            conn.commit()
-
-            target_row = conn.execute(
-                "SELECT id FROM nodes WHERE agent_id = ? AND name = ?",
-                (agent_id, target_name),
+            # Find-or-create the target node
+            existing_target = conn.execute(
+                "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+                (target_name, tgt_label),
             ).fetchone()
-            target_id = target_row["id"]
+            if existing_target:
+                target_id = existing_target["id"]
+                conn.execute(
+                    """
+                    UPDATE nodes SET
+                        data_class = ?,
+                        tier = ?,
+                        source = ?,
+                        as_of = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        meta.get("data_class"), meta.get("tier"),
+                        meta.get("source", source), meta.get("as_of"),
+                        props["created_at"], target_id,
+                    ),
+                )
+            else:
+                tgt_cursor = conn.execute(
+                    """
+                    INSERT INTO nodes (agent_id, type, name, properties, data_class, tier,
+                                       source, as_of, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        agent_id, tgt_label, target_name, json.dumps(meta),
+                        meta.get("data_class"), meta.get("tier"),
+                        meta.get("source", source), meta.get("as_of"),
+                        props["created_at"], props["created_at"],
+                    ),
+                )
+                target_id = tgt_cursor.lastrowid
+            conn.commit()
 
             # Upsert edge
             conn.execute(
