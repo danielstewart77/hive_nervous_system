@@ -30,9 +30,32 @@ def require_bearer(authorization: str = Header(default="")) -> None:
         raise HTTPException(401, "Invalid token")
 
 
+def require_admin_bearer(authorization: str = Header(default="")) -> None:
+    """Bearer gate for admin endpoints (schema mutation).
+
+    Distinct from ``require_bearer`` — checks ``LUCENT_ADMIN_BEARER_TOKEN``
+    instead of the regular service token. Only hive-tools holds this; minds
+    do not. If the admin token is unset, admin endpoints are locked (NOT
+    bypass-open, unlike the regular bearer) — schema mutation is too
+    consequential to leave unauthenticated.
+    """
+    expected = os.environ.get("LUCENT_ADMIN_BEARER_TOKEN", "")
+    if not expected:
+        raise HTTPException(503, "Admin endpoints disabled: LUCENT_ADMIN_BEARER_TOKEN unset")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing or invalid Authorization header")
+    if authorization[7:] != expected:
+        raise HTTPException(401, "Invalid admin token")
+
+
 # Startup warning when bypass is active.
 if not os.environ.get("LUCENT_BEARER_TOKEN"):
     log.warning(
         "LUCENT_BEARER_TOKEN is unset — auth bypass active. "
         "Set the env var to enforce bearer-token gating."
+    )
+if not os.environ.get("LUCENT_ADMIN_BEARER_TOKEN"):
+    log.warning(
+        "LUCENT_ADMIN_BEARER_TOKEN is unset — admin endpoints (schema "
+        "mutation) will return 503 until it is set."
     )

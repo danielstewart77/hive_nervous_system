@@ -67,6 +67,22 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             created_at    INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS schema_types (
+            name             TEXT    PRIMARY KEY,
+            kind             TEXT    NOT NULL CHECK (kind IN ('first-class','second-class')),
+            property_schema  TEXT    NOT NULL,
+            created_at       REAL    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS schema_edges (
+            name             TEXT    PRIMARY KEY,
+            source_type      TEXT    NOT NULL,
+            target_type      TEXT    NOT NULL,
+            attr_schema      TEXT    NOT NULL,
+            symmetric        INTEGER NOT NULL DEFAULT 0,
+            created_at       REAL    NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_nodes_agent_id    ON nodes(agent_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_type         ON nodes(type);
         CREATE INDEX IF NOT EXISTS idx_nodes_first_name   ON nodes(first_name);
@@ -76,6 +92,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at);
         CREATE INDEX IF NOT EXISTS idx_memories_data_class ON memories(data_class);
     """)
+
+    # Seed the schema tables from the hardcoded registry. Idempotent —
+    # INSERT OR IGNORE keyed on name. Rows added later via the admin
+    # endpoints are preserved.
+    from lucent_api.schema_registry import seed_schema_tables
+
+    seed_schema_tables(conn)
 
 
 def _get_connection() -> sqlite3.Connection:

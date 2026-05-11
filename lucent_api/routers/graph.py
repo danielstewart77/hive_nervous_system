@@ -12,8 +12,10 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+
+from lucent_api.auth import require_admin_bearer
 
 log = logging.getLogger(__name__)
 
@@ -156,6 +158,198 @@ def graph_upsert(body: UpsertBody) -> Any:
     except Exception as e:
         log.exception("graph_upsert failed")
         return {"upserted": False, "error": str(e)}
+
+
+@router.post("/upsert-strict")
+def graph_upsert_strict(body: UpsertBody) -> Any:
+    """Schema-validated upsert.
+
+    Runs the schema validations from `schema_registry` BEFORE the existing
+    disambiguation + orphan guards. On validation failure returns the
+    structured error shape from the tidy spec so the calling mind knows
+    exactly what was wrong and how to escalate (via
+    `POST /schema/request-new-type` in hive-tools).
+    """
+    import json as _json
+
+    from lucent_api.kg_guards import (
+        check_disambiguation,
+        check_orphan_guard,
+        send_disambiguation_message,
+    )
+    from lucent_api.lucent_graph import graph_upsert_direct
+    from lucent_api.schema_registry import validate_edge, validate_node
+
+    try:
+        # 1. Node validation — type allow-list, property schema, enums.
+        props = _json.loads(body.properties) if body.properties.strip() != "{}" else {}
+        ok, code, detail = validate_node(body.entity_type, props)
+        if not ok:
+            return {
+                "ok": False,
+                "code": code,
+                **(detail or {}),
+                "request_new_via": "POST /schema/request-new-type",
+            }
+
+        # 2. Edge validation (if a relation was supplied). The strict
+        #    endpoint requires `target_type` when relation is set — the
+        #    legacy endpoint inferred it; we require it here so the edge
+        #    direction check has both ends.
+        if body.relation:
+            if not body.target_type:
+                return {
+                    "ok": False,
+                    "code": "missing_target_type",
+                    "detail": "target_type is required when relation is set on /graph/upsert-strict",
+                }
+            ok, code, detail = validate_edge(
+                body.relation,
+                body.entity_type,
+                body.target_type,
+                attrs=None,  # edge attrs not part of UpsertBody today
+            )
+            if not ok:
+                return {
+                    "ok": False,
+                    "code": code,
+                    **(detail or {}),
+                    "request_new_via": "POST /schema/request-new-type",
+                }
+
+        # 3. Existing pre-write guards (orphan, disambiguation).
+        allowed, orphan_msg = check_orphan_guard(body.relation, body.target_name)
+        if not allowed:
+            return {"ok": False, "code": "orphan_blocked", "detail": orphan_msg}
+
+        disambig = check_disambiguation(body.name, body.entity_type, body.agent_id)
+        if disambig.action == "disambiguate":
+            send_disambiguation_message(body.name, disambig.existing_nodes)
+            return {
+                "ok": False,
+                "code": "disambiguation_required",
+                "detail": f"existing node(s) match {body.name!r}",
+                "similar_nodes": disambig.existing_nodes,
+            }
+
+        # 4. Delegate to the existing write path.
+        write_result = _decode(
+            graph_upsert_direct(
+                entity_type=body.entity_type,
+                name=body.name,
+                properties=body.properties,
+                relation=body.relation,
+                target_name=body.target_name,
+                target_type=body.target_type,
+                agent_id=body.agent_id,
+                data_class=body.data_class,
+                as_of=body.as_of,
+                source=body.source,
+            )
+        )
+        # Normalize the success envelope. The underlying function returns
+        # its own shape; wrap it consistently.
+        if isinstance(write_result, dict) and "error" in write_result:
+            return {"ok": False, "code": "write_error", "detail": write_result["error"]}
+        return {"ok": True, **(write_result if isinstance(write_result, dict) else {})}
+    except Exception as e:
+        log.exception("graph_upsert_strict failed")
+        return {"ok": False, "code": "internal_error", "detail": str(e)}
+
+
+@router.get("/schema")
+def get_schema() -> dict:
+    """Return the full schema allow-list.
+
+    Read by callers (typically minds) before they construct a write so they
+    can choose a valid type/edge and avoid round-trips on rejection.
+    """
+    from lucent_api.lucent import _get_connection
+    from lucent_api.schema_registry import all_edges_from_db, all_types_from_db
+
+    conn = _get_connection()
+    return {
+        "types": all_types_from_db(conn),
+        "edges": all_edges_from_db(conn),
+    }
+
+
+# ---- Admin: schema mutation (bearer-gated, hive-tools only) ----
+
+
+class SchemaTypeBody(BaseModel):
+    name: str
+    kind: str  # "first-class" | "second-class"
+    property_schema: dict
+
+
+class SchemaEdgeBody(BaseModel):
+    name: str
+    source_type: str
+    target_type: str
+    attr_schema: dict
+    symmetric: bool = False
+
+
+@router.post("/schema/types", dependencies=[Depends(require_admin_bearer)])
+def add_schema_type(body: SchemaTypeBody) -> dict:
+    """Insert a new node type into the allow-list.
+
+    Bearer-gated by ``LUCENT_ADMIN_BEARER_TOKEN``. Only hive-tools (which
+    fronts the request-new-type HITL flow) holds this token.
+    """
+    import json as _json
+    import time
+
+    from lucent_api.lucent import _get_connection
+
+    if body.kind not in ("first-class", "second-class"):
+        return {"ok": False, "code": "invalid_kind", "detail": "kind must be first-class or second-class"}
+
+    conn = _get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO schema_types (name, kind, property_schema, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (body.name, body.kind, _json.dumps(body.property_schema), time.time()),
+        )
+        conn.commit()
+        return {"ok": True, "name": body.name}
+    except Exception as e:
+        return {"ok": False, "code": "duplicate_or_db_error", "detail": str(e)}
+
+
+@router.post("/schema/edges", dependencies=[Depends(require_admin_bearer)])
+def add_schema_edge(body: SchemaEdgeBody) -> dict:
+    """Insert a new edge type into the allow-list. Bearer-gated."""
+    import json as _json
+    import time
+
+    from lucent_api.lucent import _get_connection
+
+    conn = _get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO schema_edges
+                (name, source_type, target_type, attr_schema, symmetric, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                body.name,
+                body.source_type,
+                body.target_type,
+                _json.dumps(body.attr_schema),
+                1 if body.symmetric else 0,
+                time.time(),
+            ),
+        )
+        conn.commit()
+        return {"ok": True, "name": body.name}
+    except Exception as e:
+        return {"ok": False, "code": "duplicate_or_db_error", "detail": str(e)}
 
 
 @router.post("/upsert-direct")
