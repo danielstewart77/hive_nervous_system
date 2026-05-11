@@ -47,7 +47,7 @@ SCHEMA_TYPES: dict[str, dict] = {
     "Device": {
         "kind": "first-class",
         "required": ["name", "kind"],
-        "optional": ["purpose", "as_of"],
+        "optional": ["purpose", "as_of", "config"],
         "enums": {
             "kind": ["phone", "laptop", "desktop", "server", "workstation", "tablet", "iot"],
         },
