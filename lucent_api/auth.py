@@ -21,12 +21,19 @@ log = logging.getLogger(__name__)
 
 def require_bearer(authorization: str = Header(default="")) -> None:
     expected = os.environ.get("LUCENT_BEARER_TOKEN", "")
+    admin = os.environ.get("LUCENT_ADMIN_BEARER_TOKEN", "")
     if not expected:
         # Bypass mode. Logged once at module load time below.
         return
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing or invalid Authorization header")
-    if authorization[7:] != expected:
+    token = authorization[7:]
+    # Admin token is strictly more privileged than the regular bearer and
+    # therefore also valid for routes gated by require_bearer. This matters
+    # because admin endpoints (e.g. /graph/schema/types) live inside the
+    # graph router, which has require_bearer as a router-level dep — without
+    # this acceptance, hive-tools would have to send two different headers.
+    if token != expected and (not admin or token != admin):
         raise HTTPException(401, "Invalid token")
 
 
