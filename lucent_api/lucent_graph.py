@@ -19,14 +19,15 @@ from datetime import datetime, timezone
 
 import requests
 from core.memory_schema import validate_source
+from lucent_api.schema_registry import SCHEMA_TYPES
 
 logger = logging.getLogger(__name__)
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
 HITL_TTL = 180
 
-_VALID_ENTITY_TYPES = {"Mind", "Person", "Project", "System", "Concept", "Preference"}
-_VALID_RELATIONS = {"KNOWS_ABOUT", "WORKS_ON", "PREFERS", "RELATED_TO", "MANAGES"}
+# Allow-list is derived from the schema registry — single source of truth.
+# Add new node types by editing SCHEMA_TYPES in schema_registry.py.
 _RELATION_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -45,9 +46,9 @@ def _hitl_gate(summary: str) -> bool:
 
 
 def _validate_label(entity_type: str) -> str:
-    if entity_type not in _VALID_ENTITY_TYPES:
+    if entity_type not in SCHEMA_TYPES:
         raise ValueError(
-            f"Invalid entity_type {entity_type!r}. Must be one of: {sorted(_VALID_ENTITY_TYPES)}"
+            f"Invalid entity_type {entity_type!r}. Must be one of: {sorted(SCHEMA_TYPES)}"
         )
     return entity_type
 
@@ -96,6 +97,7 @@ def graph_upsert_direct(
     relation: str = "",
     target_name: str = "",
     target_type: str = "",
+    edge_attrs: str = "{}",
     agent_id: str,
     as_of: str | None = None,
     source: str = "user",
@@ -226,22 +228,24 @@ def graph_upsert_direct(
             conn.commit()
 
             # Upsert edge
+            edge_props_json = edge_attrs if edge_attrs.strip() else "{}"
             conn.execute(
                 """
                 INSERT INTO edges (agent_id, source_id, target_id, type,
-                                   as_of, source, data_class, tier, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   as_of, source, data_class, tier, created_at, properties)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id, target_id, type) DO UPDATE SET
                     as_of = excluded.as_of,
                     source = excluded.source,
                     data_class = excluded.data_class,
-                    tier = excluded.tier
+                    tier = excluded.tier,
+                    properties = excluded.properties
                 """,
                 (
                     agent_id, node_id, target_id, rel_type,
                     meta.get("as_of"), meta.get("source", source),
                     meta.get("data_class"), meta.get("tier"),
-                    props["created_at"],
+                    props["created_at"], edge_props_json,
                 ),
             )
             conn.commit()
@@ -338,7 +342,7 @@ def graph_upsert(
 
 def graph_query(
     entity_name: str,
-    agent_id: str,
+    agent_id: str = "",
     depth: int = 1,
 ) -> str:
     """Retrieve knowledge graph node(s) and their connected relationships.
@@ -351,7 +355,9 @@ def graph_query(
 
     Args:
         entity_name: Name to look up. Empty string returns no results.
-        agent_id: Which agent's graph to search.
+        agent_id: Accepted for backward compatibility but ignored. Reads are
+            not partitioned by mind — every mind sees every node. agent_id
+            is a write-side provenance/protection field only.
         depth: How many hops to traverse (default 1, max 3).
 
     Returns:
@@ -364,24 +370,20 @@ def graph_query(
         conn = _get_conn()
 
         # Identity-only match: name / first_name / last_name (exact, case-insensitive),
-        # or alias-element within the JSON aliases array.
-        # The alias LIKE pattern is bounded with JSON quotes ('%"<name>"%') so that
-        # 'Dan' does not match 'Daniel' unless 'Dan' is itself an array element.
-        # json_extract scopes the substring scan to the aliases field only — other
-        # property values do not pollute identity lookup.
+        # or alias-element within the JSON aliases array. No agent_id filter —
+        # nodes are global, agent_id is provenance, not partition.
         alias_pattern = f'%"{entity_name}"%'
         rows = conn.execute(
             """
-            SELECT id, name, type, first_name, last_name, properties,
+            SELECT id, name, type, first_name, last_name, properties, agent_id,
                    data_class, tier, source, as_of, created_at, updated_at
             FROM nodes
-            WHERE agent_id = ?
-              AND (name = ? COLLATE NOCASE
-                   OR first_name = ? COLLATE NOCASE
-                   OR last_name = ? COLLATE NOCASE
-                   OR json_extract(properties, '$.aliases') LIKE ?)
+            WHERE name = ? COLLATE NOCASE
+               OR first_name = ? COLLATE NOCASE
+               OR last_name = ? COLLATE NOCASE
+               OR json_extract(properties, '$.aliases') LIKE ?
             """,
-            (agent_id, entity_name, entity_name, entity_name, alias_pattern),
+            (entity_name, entity_name, entity_name, alias_pattern),
         ).fetchall()
 
         if not rows:
@@ -393,7 +395,7 @@ def graph_query(
             props = json.loads(row["properties"]) if row["properties"] else {}
             props["name"] = node_name
             props["type"] = row["type"]
-            props["agent_id"] = agent_id
+            props["agent_id"] = row["agent_id"]
             if row["first_name"]:
                 props["first_name"] = row["first_name"]
             if row["last_name"]:
@@ -415,6 +417,7 @@ def graph_query(
                     edges = conn.execute(
                         """
                         SELECT e.type AS rel_type, e.target_id, e.source_id,
+                               e.properties AS edge_props,
                                n.name AS connected_name, n.type AS connected_type,
                                n.properties AS connected_props,
                                n.first_name, n.last_name
@@ -447,9 +450,13 @@ def graph_query(
                             conn_props["last_name"] = edge["last_name"]
 
                         direction = "out" if edge["source_id"] == nid else "in"
+                        edge_attrs = json.loads(edge["edge_props"]) if edge["edge_props"] else {}
+                        via_entry = {"type": edge["rel_type"], "direction": direction}
+                        if edge_attrs:
+                            via_entry["attrs"] = edge_attrs
                         nodes[node_name]["connections"].append({
                             "node": conn_props,
-                            "via": [{"type": edge["rel_type"], "direction": direction}],
+                            "via": [via_entry],
                         })
                 frontier = next_frontier
 
@@ -526,20 +533,20 @@ def search_person(
     title: str = "",
     relationship: str = "",
     *,
-    agent_id: str,
+    agent_id: str = "",
 ) -> str:
     """Search for Person nodes by any known name fragment or relationship.
 
-    All parameters are optional but at least one must be provided.
-    Matching is case-insensitive substring.
-    Multiple params are combined with AND.
+    At least one of first_name/last_name/title/relationship must be provided.
+    Matching is case-insensitive substring. Multiple params are combined with AND.
 
     Args:
         first_name: Given name fragment.
         last_name: Surname fragment.
         title: Title or honorific fragment.
         relationship: How this person relates to Daniel.
-        agent_id: Which agent's graph to search.
+        agent_id: Accepted for backward compatibility but ignored. Reads are
+            not partitioned by mind — every mind sees every Person node.
 
     Returns:
         JSON with matching Person nodes and their properties.
@@ -550,9 +557,9 @@ def search_person(
     try:
         conn = _get_conn()
 
-        # Build dynamic WHERE clause
-        conditions = ["type = 'Person'", "agent_id = ?"]
-        params: list[str] = [agent_id]
+        # Build dynamic WHERE clause. No agent_id partitioning on reads.
+        conditions = ["type = 'Person'"]
+        params: list[str] = []
 
         if first_name:
             conditions.append("LOWER(COALESCE(first_name, '')) LIKE LOWER(?)")

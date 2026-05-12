@@ -42,6 +42,7 @@ class UpsertBody(BaseModel):
     relation: str = ""
     target_name: str = ""
     target_type: str = ""
+    edge_attrs: str = "{}"
     as_of: str | None = None
     source: str = "user"
 
@@ -63,10 +64,14 @@ class UpdatePersonNamesBody(BaseModel):
 @router.get("/query")
 def graph_query(
     entity_name: str = Query(...),
-    agent_id: str = Query(...),
+    agent_id: str = Query(""),
     depth: int = Query(1, ge=1, le=3),
 ) -> Any:
-    """Retrieve graph node(s) and connected relationships."""
+    """Retrieve graph node(s) and connected relationships.
+
+    `agent_id` is accepted for backward compatibility but ignored — reads
+    are not partitioned by mind. Every mind sees every node.
+    """
     from lucent_api.lucent_graph import graph_query as _graph_query
 
     return _decode(_graph_query(entity_name=entity_name, agent_id=agent_id, depth=depth))
@@ -88,13 +93,16 @@ def graph_search(
 
 @router.get("/person/search")
 def search_person(
-    agent_id: str = Query(...),
+    agent_id: str = Query(""),
     first_name: str = Query(""),
     last_name: str = Query(""),
     title: str = Query(""),
     relationship: str = Query(""),
 ) -> Any:
-    """Fuzzy person search by name fragments, title, or relationship."""
+    """Fuzzy person search by name fragments, title, or relationship.
+
+    `agent_id` accepted for backward compatibility but ignored.
+    """
     from lucent_api.lucent_graph import search_person as _search_person
 
     return _decode(
@@ -149,6 +157,7 @@ def graph_upsert(body: UpsertBody) -> Any:
                 relation=body.relation,
                 target_name=body.target_name,
                 target_type=body.target_type,
+                edge_attrs=body.edge_attrs,
                 agent_id=body.agent_id,
                 data_class=body.data_class,
                 as_of=body.as_of,
@@ -203,11 +212,12 @@ def graph_upsert_strict(body: UpsertBody) -> Any:
                     "code": "missing_target_type",
                     "detail": "target_type is required when relation is set on /graph/upsert-strict",
                 }
+            edge_attrs = _json.loads(body.edge_attrs) if body.edge_attrs.strip() != "{}" else {}
             ok, code, detail = validate_edge(
                 body.relation,
                 body.entity_type,
                 body.target_type,
-                attrs=None,  # edge attrs not part of UpsertBody today
+                attrs=edge_attrs or None,
             )
             if not ok:
                 return {
@@ -241,6 +251,7 @@ def graph_upsert_strict(body: UpsertBody) -> Any:
                 relation=body.relation,
                 target_name=body.target_name,
                 target_type=body.target_type,
+                edge_attrs=body.edge_attrs,
                 agent_id=body.agent_id,
                 data_class=body.data_class,
                 as_of=body.as_of,
@@ -366,6 +377,7 @@ def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
             relation=body.relation,
             target_name=body.target_name,
             target_type=body.target_type,
+            edge_attrs=body.edge_attrs,
             agent_id=body.agent_id,
             data_class=body.data_class,
             as_of=body.as_of,
@@ -403,7 +415,7 @@ def update_person_names(body: UpdatePersonNamesBody) -> Any:
 @router.get("/raw-properties")
 def graph_raw_properties(
     name: str = Query(...),
-    agent_id: str = Query(...),
+    agent_id: str = Query(""),
 ) -> dict:
     """Return a node's raw properties blob, unflattened.
 
@@ -413,16 +425,18 @@ def graph_raw_properties(
     `type`). The standard `/graph/query` flattens column values over inner
     blob keys, so collision-prone keys are silently overwritten on reads.
 
+    `agent_id` accepted for backward compatibility but ignored.
+
     Response shape:
-      - `{"found": true, "properties": {...}}` — node exists, blob returned.
+      - `{"found": true, "properties": {...}, "agent_id": "..."}` — node exists.
       - `{"found": false}` — no matching node.
     """
     from lucent_api.lucent import _get_connection
 
     conn = _get_connection()
     row = conn.execute(
-        "SELECT properties FROM nodes WHERE LOWER(name)=LOWER(?) AND agent_id=? LIMIT 1",
-        (name, agent_id),
+        "SELECT properties, agent_id FROM nodes WHERE LOWER(name)=LOWER(?) LIMIT 1",
+        (name,),
     ).fetchone()
     if row is None:
         return {"found": False}
@@ -430,7 +444,7 @@ def graph_raw_properties(
         blob = json.loads(row["properties"]) if row["properties"] else {}
     except (TypeError, ValueError):
         blob = {}
-    return {"found": True, "properties": blob}
+    return {"found": True, "properties": blob, "agent_id": row["agent_id"]}
 
 
 @router.get("/data")

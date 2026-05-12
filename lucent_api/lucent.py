@@ -47,6 +47,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             data_class  TEXT,
             tier        TEXT,
             created_at  REAL,
+            properties  TEXT    NOT NULL DEFAULT '{}',
             UNIQUE(source_id, target_id, type)
         );
 

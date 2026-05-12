@@ -52,6 +52,12 @@ SCHEMA_TYPES: dict[str, dict] = {
             "kind": ["phone", "laptop", "desktop", "server", "workstation", "tablet", "iot"],
         },
     },
+    "Organization": {
+        "kind": "first-class",
+        "required": ["name"],
+        "optional": ["full_name", "kind", "email", "phone", "website", "as_of"],
+        "enums": {},
+    },
     # ---- Person facets ----
     "ContactMethod": {
         "kind": "second-class",
@@ -70,6 +76,14 @@ SCHEMA_TYPES: dict[str, dict] = {
             "kind": ["home", "work", "school", "city", "country"],
         },
     },
+    "Address": {
+        "kind": "second-class",
+        "required": ["street"],
+        "optional": ["city", "state", "postal_code", "country", "label", "as_of"],
+        "enums": {
+            "label": ["home", "work", "mailing"],
+        },
+    },
     "Employment": {
         "kind": "second-class",
         "required": ["employer_name"],
@@ -79,7 +93,7 @@ SCHEMA_TYPES: dict[str, dict] = {
     "Interest": {
         "kind": "second-class",
         "required": ["name", "kind"],
-        "optional": ["as_of"],
+        "optional": ["notes", "as_of"],
         "enums": {
             "kind": ["hobby", "sport", "media", "topic", "food"],
         },
@@ -163,6 +177,14 @@ SCHEMA_EDGES: dict[str, dict] = {
         "enums": {},
         "symmetric": False,
     },
+    "HAS_ADDRESS": {
+        "source_type": "Person",
+        "target_type": "Address",
+        "required_attrs": [],
+        "optional_attrs": ["since", "until"],
+        "enums": {},
+        "symmetric": False,
+    },
     "WORKS_IN": {
         "source_type": "Person",
         "target_type": "Place",
@@ -176,6 +198,30 @@ SCHEMA_EDGES: dict[str, dict] = {
         "target_type": "Employment",
         "required_attrs": [],
         "optional_attrs": [],
+        "enums": {},
+        "symmetric": False,
+    },
+    "LOCATED_AT": {
+        "source_type": "Employment",
+        "target_type": "Place",
+        "required_attrs": [],
+        "optional_attrs": [],
+        "enums": {},
+        "symmetric": False,
+    },
+    "HAS_SIDE_GIG": {
+        "source_type": "Person",
+        "target_type": "Organization",
+        "required_attrs": [],
+        "optional_attrs": ["since", "until"],
+        "enums": {},
+        "symmetric": False,
+    },
+    "FOUNDED_BY": {
+        "source_type": "Organization",
+        "target_type": "Person",
+        "required_attrs": [],
+        "optional_attrs": ["since"],
         "enums": {},
         "symmetric": False,
     },
@@ -211,6 +257,14 @@ SCHEMA_EDGES: dict[str, dict] = {
         "enums": {},
         "symmetric": False,
     },
+    "CHILD_OF": {
+        "source_type": "Person",
+        "target_type": "Person",
+        "required_attrs": [],
+        "optional_attrs": [],
+        "enums": {},
+        "symmetric": False,
+    },
     "SPOUSE_OF": {
         "source_type": "Person",
         "target_type": "Person",
@@ -227,11 +281,27 @@ SCHEMA_EDGES: dict[str, dict] = {
         "enums": {},
         "symmetric": True,
     },
+    "FRIEND_OF": {
+        "source_type": "Person",
+        "target_type": "Person",
+        "required_attrs": [],
+        "optional_attrs": ["since", "context"],
+        "enums": {},
+        "symmetric": True,
+    },
     "OWNED_BY": {
         "source_type": "Mind",
         "target_type": "Person",
         "required_attrs": [],
         "optional_attrs": [],
+        "enums": {},
+        "symmetric": False,
+    },
+    "CREATED_BY": {
+        "source_type": "Mind",
+        "target_type": "Person",
+        "required_attrs": [],
+        "optional_attrs": ["since"],
         "enums": {},
         "symmetric": False,
     },

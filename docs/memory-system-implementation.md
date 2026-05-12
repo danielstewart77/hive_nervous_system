@@ -536,7 +536,7 @@ upfront for the next adopter.
 
 - `_check_identity_guard` keys on `type='Mind'`. A mind whose node is `type='Person'` or `type='Agent'` is **not protected** by the guard.
 - When seeding a mind's identity node for the first time, write `type='Mind'` from the start.
-- The valid-entity-type set in `_VALID_ENTITY_TYPES` includes `Mind`. Don't drop it.
+- The valid-entity-type set is derived from `schema_registry.SCHEMA_TYPES` (single source of truth) and includes `Mind`. Don't drop it.
 
 ### Class taxonomy
 
