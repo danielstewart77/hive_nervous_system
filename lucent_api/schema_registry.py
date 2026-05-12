@@ -289,6 +289,14 @@ SCHEMA_EDGES: dict[str, dict] = {
         "enums": {},
         "symmetric": True,
     },
+    "MEMBER_OF": {
+        "source_type": "Person",
+        "target_type": "Organization",
+        "required_attrs": [],
+        "optional_attrs": ["role", "title", "since", "until"],
+        "enums": {},
+        "symmetric": False,
+    },
     "OWNED_BY": {
         "source_type": "Mind",
         "target_type": "Person",
