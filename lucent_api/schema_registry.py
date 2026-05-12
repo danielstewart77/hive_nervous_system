@@ -84,12 +84,6 @@ SCHEMA_TYPES: dict[str, dict] = {
             "label": ["home", "work", "mailing"],
         },
     },
-    "Employment": {
-        "kind": "second-class",
-        "required": ["employer_name"],
-        "optional": ["title", "since", "until"],
-        "enums": {},
-    },
     "Interest": {
         "kind": "second-class",
         "required": ["name", "kind"],
@@ -187,22 +181,6 @@ SCHEMA_EDGES: dict[str, dict] = {
     },
     "WORKS_IN": {
         "source_type": "Person",
-        "target_type": "Place",
-        "required_attrs": [],
-        "optional_attrs": [],
-        "enums": {},
-        "symmetric": False,
-    },
-    "WORKS_AT": {
-        "source_type": "Person",
-        "target_type": "Employment",
-        "required_attrs": [],
-        "optional_attrs": [],
-        "enums": {},
-        "symmetric": False,
-    },
-    "LOCATED_AT": {
-        "source_type": "Employment",
         "target_type": "Place",
         "required_attrs": [],
         "optional_attrs": [],
