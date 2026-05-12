@@ -187,6 +187,14 @@ SCHEMA_EDGES: dict[str, dict] = {
         "enums": {},
         "symmetric": False,
     },
+    "LOCATED_AT": {
+        "source_type": "Organization",
+        "target_type": "Place",
+        "required_attrs": [],
+        "optional_attrs": ["since", "until"],
+        "enums": {},
+        "symmetric": False,
+    },
     "HAS_SIDE_GIG": {
         "source_type": "Person",
         "target_type": "Organization",
