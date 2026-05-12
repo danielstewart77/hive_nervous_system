@@ -436,11 +436,11 @@ def graph_query(
                             edge["target_id"] if edge["source_id"] == nid
                             else edge["source_id"]
                         )
-                        if connected_id in visited:
-                            continue
-                        visited.add(connected_id)
-                        next_frontier.append(connected_id)
 
+                        # Surface every edge — `visited` only gates BFS frontier
+                        # expansion (cycle prevention), not edge surfacing. Two
+                        # nodes may have multiple edges between them (e.g. both
+                        # PARENT_OF and CHILD_OF, or FRIEND_OF and COWORKER_OF).
                         conn_props = json.loads(edge["connected_props"]) if edge["connected_props"] else {}
                         conn_props["name"] = edge["connected_name"]
                         conn_props["type"] = edge["connected_type"]
@@ -458,6 +458,10 @@ def graph_query(
                             "node": conn_props,
                             "via": [via_entry],
                         })
+
+                        if connected_id not in visited:
+                            visited.add(connected_id)
+                            next_frontier.append(connected_id)
                 frontier = next_frontier
 
         matches = list(nodes.values())
