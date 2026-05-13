@@ -267,6 +267,14 @@ SCHEMA_EDGES: dict[str, dict] = {
         "enums": {},
         "symmetric": True,
     },
+    "REPORTS_TO": {
+        "source_type": "Person",
+        "target_type": "Person",
+        "required_attrs": [],
+        "optional_attrs": ["since", "until"],
+        "enums": {},
+        "symmetric": False,
+    },
     "FRIEND_OF": {
         "source_type": "Person",
         "target_type": "Person",
