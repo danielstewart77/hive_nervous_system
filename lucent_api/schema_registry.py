@@ -35,7 +35,15 @@ SCHEMA_TYPES: dict[str, dict] = {
     "Person": {
         "kind": "first-class",
         "required": ["name"],
-        "optional": ["first_name", "last_name"],
+        "optional": [
+            "first_name",
+            "middle_name",
+            "last_name",
+            "title",
+            "aliases",
+            "birthday",
+            "phonetic",
+        ],
         "enums": {},
     },
     "Mind": {
