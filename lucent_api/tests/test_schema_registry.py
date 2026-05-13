@@ -92,6 +92,21 @@ class ValidateNodeTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(code, "missing_required")
 
+    def test_person_extended_whitelist(self):
+        ok, _, _ = validate_node(
+            "Person",
+            {
+                "first_name": "Daniel",
+                "middle_name": "Sloan",
+                "last_name": "Stewart",
+                "title": "Dr.",
+                "aliases": ["Sloan"],
+                "birthday": "2014-04-03",
+                "phonetic": "SHAO-lan",
+            },
+        )
+        self.assertTrue(ok)
+
 
 class ValidateEdgeTests(unittest.TestCase):
     def test_valid_edge_passes(self):
