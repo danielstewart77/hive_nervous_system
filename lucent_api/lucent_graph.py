@@ -1029,6 +1029,44 @@ def graph_edge_create(
         return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
 
 
+def graph_node_delete(
+    *,
+    entity_type: str,
+    name: str,
+) -> str:
+    """Hard-delete the node identified by (name, type) and every edge
+    touching it (inbound or outbound). Returns counts. Use for true
+    duplicates or write-mistakes; for facts that became stale prefer
+    setting ``superseded = true`` via /properties/merge.
+    """
+    try:
+        label = _validate_label(entity_type)
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (name, label),
+        ).fetchone()
+        if not row:
+            return json.dumps({"ok": False, "code": "not_found",
+                               "detail": f"node not found: name={name!r} type={label!r}"})
+        node_id = row["id"]
+        edge_cursor = conn.execute(
+            "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
+            (node_id, node_id),
+        )
+        edges_removed = edge_cursor.rowcount
+        node_cursor = conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+        conn.commit()
+        return json.dumps({
+            "ok": True,
+            "id": node_id,
+            "edges_deleted": edges_removed,
+            "node_deleted": node_cursor.rowcount,
+        })
+    except Exception as e:
+        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+
+
 def graph_edge_delete(
     *,
     source_name: str,

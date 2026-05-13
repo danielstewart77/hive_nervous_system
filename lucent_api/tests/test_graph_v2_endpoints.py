@@ -305,5 +305,47 @@ class EdgeDeleteTests(unittest.TestCase):
         self.assertEqual(remaining["c"], 0)
 
 
+class NodeDeleteTests(unittest.TestCase):
+    def test_delete_cascades_edges(self):
+        conn = _make_test_conn()
+        manny_id = _seed_person(conn, "Manny")
+        zoe_id = _seed_person(conn, "Zoe")
+        carl_id = _seed_person(conn, "Carl")
+        now = time.time()
+        # Manny has both inbound and outbound edges; both should be cascaded.
+        conn.execute(
+            "INSERT INTO edges (agent_id, source_id, target_id, type, created_at) "
+            "VALUES ('testmind', ?, ?, 'PARENT_OF', ?)",
+            (manny_id, zoe_id, now),
+        )
+        conn.execute(
+            "INSERT INTO edges (agent_id, source_id, target_id, type, created_at) "
+            "VALUES ('testmind', ?, ?, 'FRIEND_OF', ?)",
+            (carl_id, manny_id, now),
+        )
+        conn.commit()
+        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
+            from lucent_api.lucent_graph import graph_node_delete
+            result = json.loads(graph_node_delete(entity_type="Person", name="Manny"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["node_deleted"], 1)
+        self.assertEqual(result["edges_deleted"], 2)
+        remaining_nodes = conn.execute(
+            "SELECT COUNT(*) AS c FROM nodes WHERE name='Manny'"
+        ).fetchone()
+        self.assertEqual(remaining_nodes["c"], 0)
+        # The other nodes (Zoe, Carl) survive.
+        survivors = conn.execute("SELECT COUNT(*) AS c FROM nodes").fetchone()
+        self.assertEqual(survivors["c"], 2)
+
+    def test_delete_missing_node(self):
+        conn = _make_test_conn()
+        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
+            from lucent_api.lucent_graph import graph_node_delete
+            result = json.loads(graph_node_delete(entity_type="Person", name="Nobody"))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "not_found")
+
+
 if __name__ == "__main__":
     unittest.main()

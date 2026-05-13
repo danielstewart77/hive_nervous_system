@@ -85,6 +85,11 @@ class PropertiesRemoveBody(BaseModel):
     keys: list[str]
 
 
+class NodeDeleteBody(BaseModel):
+    entity_type: str
+    name: str
+
+
 class EdgeBody(BaseModel):
     source_name: str
     source_type: str
@@ -536,6 +541,19 @@ def graph_edges_delete(body: EdgeBody) -> Any:
             target_type=body.target_type,
             relation=body.relation,
         )
+    )
+
+
+@router.delete("/nodes")
+def graph_nodes_delete(body: NodeDeleteBody) -> Any:
+    """Hard-delete a node and every edge touching it. Use for true
+    duplicates or write-mistakes; for facts that became stale prefer
+    setting ``superseded = true`` via /properties/merge.
+    """
+    from lucent_api.lucent_graph import graph_node_delete
+
+    return _decode(
+        graph_node_delete(entity_type=body.entity_type, name=body.name)
     )
 
 
