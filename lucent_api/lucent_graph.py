@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 
@@ -395,7 +396,11 @@ def graph_query(
             props = json.loads(row["properties"]) if row["properties"] else {}
             props["name"] = node_name
             props["type"] = row["type"]
-            props["agent_id"] = row["agent_id"]
+            # agent_id is writer-provenance, not a node attribute.
+            # Surface it only on Mind nodes (where it identifies the mind
+            # itself); on other node types it's noise.
+            if row["type"] == "Mind":
+                props["agent_id"] = row["agent_id"]
             if row["first_name"]:
                 props["first_name"] = row["first_name"]
             if row["last_name"]:
@@ -596,7 +601,10 @@ def search_person(
         for row in rows:
             props = json.loads(row["properties"]) if row["properties"] else {}
             props["name"] = row["name"]
-            props["agent_id"] = row["agent_id"]
+            # agent_id is writer-provenance — surface only on Mind nodes.
+            # search_person is Person-only, so this never returns agent_id.
+            if row["type"] == "Mind":
+                props["agent_id"] = row["agent_id"]
             if row["first_name"]:
                 props["first_name"] = row["first_name"]
             if row["last_name"]:
@@ -718,6 +726,346 @@ def update_person_names(
         return json.dumps({"error": str(e)})
 
 
+# ---- Property-safe v2 helpers ----
+#
+# The legacy upsert path is full-replace on the properties blob: passing
+# a partial properties dict silently drops every key not in the request,
+# and creating an edge via the same call also clobbers the source node's
+# properties. These helpers separate the four real intents (create node,
+# merge properties, remove properties, manage edges) so callers can't
+# accidentally erase a node's body just to add a single field.
+
+# Columns that live outside the properties JSON blob — handled by hand
+# when merging/removing.
+_COLUMN_KEYS = {"first_name", "last_name"}
+
+# Vector-store columns that leaked onto the nodes table. They have their
+# own SQL columns (not properties JSON), and the KG tidy walk needs to
+# null them out. NOT in `_PROTECTED_METADATA_KEYS` for this reason.
+_VECTOR_LEAKAGE_COLUMNS = {"data_class", "tier", "source"}
+# Standard metadata that callers cannot remove via /properties/remove —
+# stripping any of these would break the node row's identity, timestamps,
+# or staleness tracking. Vector-store fields (`data_class`, `tier`,
+# `source`) are intentionally NOT here: they leak onto KG nodes from the
+# shared write pipeline and need to be removable during the KG tidy walk.
+_PROTECTED_METADATA_KEYS = {
+    "name", "type", "created_at", "updated_at", "as_of", "superseded",
+}
+
+
+def graph_node_create(
+    *,
+    entity_type: str,
+    name: str,
+    data_class: str,
+    agent_id: str,
+    properties: str = "{}",
+    as_of: str | None = None,
+    source: str = "user",
+) -> str:
+    """Create a new node. Errors if a node with (name, type) already exists.
+
+    Use this when you want creation semantics — not "create-or-replace".
+    For property edits on existing nodes use ``graph_properties_merge``.
+    """
+    try:
+        try:
+            validate_source(source)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
+        label = _validate_label(entity_type)
+        props = json.loads(properties) if properties.strip() != "{}" else {}
+
+        conn = _get_conn()
+        existing = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (name, label),
+        ).fetchone()
+        if existing:
+            return json.dumps({
+                "ok": False,
+                "code": "exists",
+                "detail": f"node already exists: name={name!r} type={label!r}",
+                "id": existing["id"],
+            })
+
+        guard_err = _check_identity_guard(conn, name, agent_id)
+        if guard_err is not None:
+            return json.dumps({"ok": False, "code": "identity_guard", "detail": guard_err})
+
+        meta = {
+            "data_class": data_class or "",
+            "tier": "contextual",
+            "as_of": as_of or datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "superseded": False,
+        }
+        first_name = props.pop("first_name", None)
+        last_name = props.pop("last_name", None)
+        props.update(meta)
+        props["created_at"] = time.time()
+
+        cursor = conn.execute(
+            """
+            INSERT INTO nodes (agent_id, type, name, first_name, last_name,
+                               properties, data_class, tier, source, as_of,
+                               created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_id, label, name, first_name, last_name,
+                json.dumps(props), meta["data_class"], meta["tier"],
+                meta["source"], meta["as_of"],
+                props["created_at"], props["created_at"],
+            ),
+        )
+        conn.commit()
+        return json.dumps({"ok": True, "id": cursor.lastrowid, "name": name, "type": label})
+    except Exception as e:
+        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+
+
+def graph_properties_merge(
+    *,
+    entity_type: str,
+    name: str,
+    properties: str,
+    as_of: str | None = None,
+    source: str | None = None,
+) -> str:
+    """Merge ``properties`` into an existing node's properties blob.
+
+    Keys present in the request are set (overwriting prior values for
+    those keys). Keys NOT in the request are preserved. This is the
+    additive counterpart to the full-replace upsert.
+
+    ``first_name`` and ``last_name`` in the request map to their columns
+    rather than the properties blob, matching the existing storage shape.
+    """
+    try:
+        label = _validate_label(entity_type)
+        new_props = json.loads(properties) if properties.strip() else {}
+        if not isinstance(new_props, dict):
+            return json.dumps({"ok": False, "code": "invalid_properties",
+                               "detail": "properties must be a JSON object"})
+
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT id, properties FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (name, label),
+        ).fetchone()
+        if not row:
+            return json.dumps({"ok": False, "code": "not_found",
+                               "detail": f"node not found: name={name!r} type={label!r}"})
+
+        # Split off column-backed keys.
+        first_name = new_props.pop("first_name", None)
+        last_name = new_props.pop("last_name", None)
+
+        existing = json.loads(row["properties"]) if row["properties"] else {}
+        existing.update(new_props)
+        now_iso = as_of or datetime.now(timezone.utc).isoformat()
+        existing["updated_at"] = time.time()
+        if source is not None:
+            existing["source"] = source
+
+        # Build dynamic SET clause for column updates.
+        set_parts = ["properties = ?", "updated_at = ?", "as_of = ?"]
+        params: list = [json.dumps(existing), existing["updated_at"], now_iso]
+        if first_name is not None:
+            set_parts.append("first_name = ?")
+            params.append(first_name)
+        if last_name is not None:
+            set_parts.append("last_name = ?")
+            params.append(last_name)
+        if source is not None:
+            set_parts.append("source = ?")
+            params.append(source)
+        params.append(row["id"])
+
+        conn.execute(f"UPDATE nodes SET {', '.join(set_parts)} WHERE id = ?", params)
+        conn.commit()
+        return json.dumps({"ok": True, "id": row["id"], "merged_keys": sorted(new_props.keys())})
+    except Exception as e:
+        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+
+
+def graph_properties_remove(
+    *,
+    entity_type: str,
+    name: str,
+    keys: list[str],
+) -> str:
+    """Remove named keys from an existing node's properties blob.
+
+    Rejects requests to remove protected metadata keys (data_class, tier,
+    source, as_of, created_at, updated_at, superseded, name, type).
+    ``first_name`` / ``last_name`` in ``keys`` clear the corresponding
+    column.
+    """
+    try:
+        label = _validate_label(entity_type)
+        if not isinstance(keys, list):
+            return json.dumps({"ok": False, "code": "invalid_keys",
+                               "detail": "keys must be a JSON array"})
+
+        protected_violations = [k for k in keys if k in _PROTECTED_METADATA_KEYS]
+        if protected_violations:
+            return json.dumps({
+                "ok": False, "code": "protected_metadata",
+                "detail": f"these keys cannot be removed: {protected_violations}",
+            })
+
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT id, properties FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (name, label),
+        ).fetchone()
+        if not row:
+            return json.dumps({"ok": False, "code": "not_found",
+                               "detail": f"node not found: name={name!r} type={label!r}"})
+
+        existing = json.loads(row["properties"]) if row["properties"] else {}
+        removed: list[str] = []
+        for k in keys:
+            if k in _COLUMN_KEYS:
+                continue  # handled by NULL on the column below
+            if k in existing:
+                existing.pop(k)
+                removed.append(k)
+            # Vector-leakage keys may also live in their dedicated column —
+            # the column NULL update below catches that. Either path counts.
+        existing["updated_at"] = time.time()
+
+        set_parts = ["properties = ?", "updated_at = ?"]
+        params: list = [json.dumps(existing), existing["updated_at"]]
+        if "first_name" in keys:
+            set_parts.append("first_name = NULL")
+            removed.append("first_name")
+        if "last_name" in keys:
+            set_parts.append("last_name = NULL")
+            removed.append("last_name")
+        for col in _VECTOR_LEAKAGE_COLUMNS:
+            if col in keys:
+                set_parts.append(f"{col} = NULL")
+                if col not in removed:
+                    removed.append(col)
+        params.append(row["id"])
+
+        conn.execute(f"UPDATE nodes SET {', '.join(set_parts)} WHERE id = ?", params)
+        conn.commit()
+        return json.dumps({"ok": True, "id": row["id"], "removed_keys": removed})
+    except Exception as e:
+        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+
+
+def graph_edge_create(
+    *,
+    source_name: str,
+    source_type: str,
+    target_name: str,
+    target_type: str,
+    relation: str,
+    edge_attrs: str = "{}",
+    data_class: str,
+    agent_id: str,
+    as_of: str | None = None,
+    source: str = "user",
+) -> str:
+    """Create an edge between two existing nodes. Neither node's properties
+    are touched. Both endpoints must already exist; orphan-create is
+    intentionally not supported here — it's a separate concern.
+    """
+    try:
+        try:
+            validate_source(source)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
+        rel_type = _validate_relation(relation)
+        src_label = _validate_label(source_type)
+        tgt_label = _validate_label(target_type)
+        attrs = json.loads(edge_attrs) if edge_attrs.strip() != "{}" else {}
+
+        conn = _get_conn()
+        src = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (source_name, src_label),
+        ).fetchone()
+        if not src:
+            return json.dumps({"ok": False, "code": "source_not_found",
+                               "detail": f"{src_label}:{source_name} not found"})
+        tgt = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (target_name, tgt_label),
+        ).fetchone()
+        if not tgt:
+            return json.dumps({"ok": False, "code": "target_not_found",
+                               "detail": f"{tgt_label}:{target_name} not found"})
+
+        now = time.time()
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO edges (agent_id, source_id, target_id, type,
+                                   as_of, source, data_class, tier, created_at, properties)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    agent_id, src["id"], tgt["id"], rel_type,
+                    as_of or datetime.now(timezone.utc).isoformat(),
+                    source, data_class or "", "contextual", now,
+                    json.dumps(attrs),
+                ),
+            )
+            conn.commit()
+            return json.dumps({"ok": True, "id": cursor.lastrowid, "relation": rel_type})
+        except sqlite3.IntegrityError as e:
+            return json.dumps({"ok": False, "code": "edge_exists",
+                               "detail": f"edge already exists: {src_label}:{source_name} -[{rel_type}]-> {tgt_label}:{target_name}",
+                               "raw": str(e)})
+    except Exception as e:
+        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+
+
+def graph_edge_delete(
+    *,
+    source_name: str,
+    source_type: str,
+    target_name: str,
+    target_type: str,
+    relation: str,
+) -> str:
+    """Delete the edge(s) matching (source_name, source_type) -[relation]->
+    (target_name, target_type). Returns the count deleted.
+    """
+    try:
+        rel_type = _validate_relation(relation)
+        src_label = _validate_label(source_type)
+        tgt_label = _validate_label(target_type)
+        conn = _get_conn()
+        src = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (source_name, src_label),
+        ).fetchone()
+        tgt = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+            (target_name, tgt_label),
+        ).fetchone()
+        if not src or not tgt:
+            return json.dumps({"ok": False, "code": "endpoint_not_found",
+                               "detail": "source or target node missing"})
+        cursor = conn.execute(
+            "DELETE FROM edges WHERE source_id = ? AND target_id = ? AND type = ?",
+            (src["id"], tgt["id"], rel_type),
+        )
+        conn.commit()
+        return json.dumps({"ok": True, "deleted": cursor.rowcount})
+    except Exception as e:
+        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+
+
 # All knowledge graph tool functions for registration
 KG_TOOLS = [
     graph_upsert,
@@ -726,4 +1074,9 @@ KG_TOOLS = [
     search_person,
     audit_person_nodes,
     update_person_names,
+    graph_node_create,
+    graph_properties_merge,
+    graph_properties_remove,
+    graph_edge_create,
+    graph_edge_delete,
 ]
