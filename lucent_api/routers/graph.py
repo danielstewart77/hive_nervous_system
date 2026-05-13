@@ -58,6 +58,46 @@ class UpdatePersonNamesBody(BaseModel):
     last_name: str = ""
 
 
+# ---- v2 property-safe endpoint bodies ----
+
+
+class NodeCreateBody(BaseModel):
+    entity_type: str
+    name: str
+    data_class: str
+    agent_id: str
+    properties: str = "{}"
+    as_of: str | None = None
+    source: str = "user"
+
+
+class PropertiesMergeBody(BaseModel):
+    entity_type: str
+    name: str
+    properties: str
+    as_of: str | None = None
+    source: str | None = None
+
+
+class PropertiesRemoveBody(BaseModel):
+    entity_type: str
+    name: str
+    keys: list[str]
+
+
+class EdgeBody(BaseModel):
+    source_name: str
+    source_type: str
+    target_name: str
+    target_type: str
+    relation: str
+    edge_attrs: str = "{}"
+    data_class: str = ""
+    agent_id: str = ""
+    as_of: str | None = None
+    source: str = "user"
+
+
 # ---- Read endpoints ----
 
 
@@ -122,6 +162,13 @@ def search_person(
 @router.post("/upsert")
 def graph_upsert(body: UpsertBody) -> Any:
     """Add or update a graph node, optionally linking to another node.
+
+    **Full-replace semantics.** The ``properties`` blob you send REPLACES
+    the existing properties on the node. Keys not in the request are
+    dropped. Creating an edge via ``relation``+``target_name`` ALSO
+    rewrites the source node's properties as a side-effect. If you only
+    want to edit one property or add an edge without touching the node,
+    use the v2 endpoints (``/graph/properties/merge`` and ``/graph/edges``).
 
     Runs the orphan and disambiguation guards from lucent_api.kg_guards. Skips the
     HITL approval step the MCP version had — the nervous system is auth-less
@@ -386,6 +433,112 @@ def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
     )
 
 
+# ---- v2 property-safe endpoints ----
+#
+# The legacy /graph/upsert family is full-replace on the properties blob
+# and writes properties on the source node as a side-effect of edge
+# creation. These endpoints split those concerns so callers can edit a
+# node without erasing the rest of it.
+
+
+@router.post("/nodes")
+def graph_nodes_create(body: NodeCreateBody) -> Any:
+    """Create a new node. Rejects if a node with (name, type) already exists.
+
+    For property edits on an existing node use /graph/properties/merge.
+    """
+    from lucent_api.lucent_graph import graph_node_create
+
+    return _decode(
+        graph_node_create(
+            entity_type=body.entity_type,
+            name=body.name,
+            data_class=body.data_class,
+            agent_id=body.agent_id,
+            properties=body.properties,
+            as_of=body.as_of,
+            source=body.source,
+        )
+    )
+
+
+@router.post("/properties/merge")
+def graph_properties_merge_endpoint(body: PropertiesMergeBody) -> Any:
+    """Merge properties into an existing node. Keys not in the request are
+    preserved — the additive counterpart to the full-replace upsert.
+    """
+    from lucent_api.lucent_graph import graph_properties_merge
+
+    return _decode(
+        graph_properties_merge(
+            entity_type=body.entity_type,
+            name=body.name,
+            properties=body.properties,
+            as_of=body.as_of,
+            source=body.source,
+        )
+    )
+
+
+@router.post("/properties/remove")
+def graph_properties_remove_endpoint(body: PropertiesRemoveBody) -> Any:
+    """Remove named keys from an existing node's properties blob.
+
+    Protected metadata (name, type, created_at, updated_at, as_of,
+    superseded) cannot be removed via this path. Vector-store columns
+    (`data_class`, `tier`, `source`) ARE removable — they leak onto KG
+    nodes from the shared write pipeline and the tidy walk strips them.
+    """
+    from lucent_api.lucent_graph import graph_properties_remove
+
+    return _decode(
+        graph_properties_remove(
+            entity_type=body.entity_type,
+            name=body.name,
+            keys=body.keys,
+        )
+    )
+
+
+@router.post("/edges")
+def graph_edges_create(body: EdgeBody) -> Any:
+    """Create an edge between two existing nodes. Neither endpoint's
+    properties are touched. Both nodes must already exist.
+    """
+    from lucent_api.lucent_graph import graph_edge_create
+
+    return _decode(
+        graph_edge_create(
+            source_name=body.source_name,
+            source_type=body.source_type,
+            target_name=body.target_name,
+            target_type=body.target_type,
+            relation=body.relation,
+            edge_attrs=body.edge_attrs,
+            data_class=body.data_class,
+            agent_id=body.agent_id,
+            as_of=body.as_of,
+            source=body.source,
+        )
+    )
+
+
+@router.delete("/edges")
+def graph_edges_delete(body: EdgeBody) -> Any:
+    """Delete edge(s) matching the (source, relation, target) tuple."""
+    from lucent_api.lucent_graph import graph_edge_delete
+
+    return _decode(
+        graph_edge_delete(
+            source_name=body.source_name,
+            source_type=body.source_type,
+            target_name=body.target_name,
+            target_type=body.target_type,
+            relation=body.relation,
+        )
+    )
+
+
 # ---- Maintenance endpoints ----
 
 
@@ -435,7 +588,7 @@ def graph_raw_properties(
 
     conn = _get_connection()
     row = conn.execute(
-        "SELECT properties, agent_id FROM nodes WHERE LOWER(name)=LOWER(?) LIMIT 1",
+        "SELECT type, properties, agent_id FROM nodes WHERE LOWER(name)=LOWER(?) LIMIT 1",
         (name,),
     ).fetchone()
     if row is None:
@@ -444,7 +597,11 @@ def graph_raw_properties(
         blob = json.loads(row["properties"]) if row["properties"] else {}
     except (TypeError, ValueError):
         blob = {}
-    return {"found": True, "properties": blob, "agent_id": row["agent_id"]}
+    # agent_id is writer-provenance — surface only on Mind nodes.
+    result = {"found": True, "properties": blob}
+    if row["type"] == "Mind":
+        result["agent_id"] = row["agent_id"]
+    return result
 
 
 @router.get("/data")
