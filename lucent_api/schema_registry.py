@@ -106,6 +106,12 @@ SCHEMA_TYPES: dict[str, dict] = {
         "optional": ["as_of"],
         "enums": {},
     },
+    "Education": {
+        "kind": "second-class",
+        "required": ["level", "school_year"],
+        "optional": ["school", "as_of"],
+        "enums": {},
+    },
     # ---- Mind facets ----
     "Skill": {
         "kind": "second-class",
@@ -230,6 +236,14 @@ SCHEMA_EDGES: dict[str, dict] = {
     "ASPIRES_TO": {
         "source_type": "Person",
         "target_type": "Aspiration",
+        "required_attrs": [],
+        "optional_attrs": [],
+        "enums": {},
+        "symmetric": False,
+    },
+    "HAS_EDUCATION": {
+        "source_type": "Person",
+        "target_type": "Education",
         "required_attrs": [],
         "optional_attrs": [],
         "enums": {},

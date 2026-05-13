@@ -81,6 +81,17 @@ class ValidateNodeTests(unittest.TestCase):
         )
         self.assertTrue(ok)
 
+    def test_valid_education_passes(self):
+        ok, _, _ = validate_node(
+            "Education", {"level": "4th grade", "school_year": "2025-2026"}
+        )
+        self.assertTrue(ok)
+
+    def test_education_missing_required_rejected(self):
+        ok, code, _ = validate_node("Education", {"level": "4th grade"})
+        self.assertFalse(ok)
+        self.assertEqual(code, "missing_required")
+
 
 class ValidateEdgeTests(unittest.TestCase):
     def test_valid_edge_passes(self):
@@ -89,7 +100,7 @@ class ValidateEdgeTests(unittest.TestCase):
         self.assertIsNone(code)
 
     def test_unknown_edge_type_rejected(self):
-        ok, code, detail = validate_edge("FRIEND_OF", "Person", "Person")
+        ok, code, detail = validate_edge("TOTALLY_BOGUS_REL", "Person", "Person")
         self.assertFalse(ok)
         self.assertEqual(code, "unknown_edge_type")
         self.assertIn("HAS_CONTACT", detail["valid_edges"])
@@ -120,6 +131,15 @@ class ValidateEdgeTests(unittest.TestCase):
 
     def test_mind_skill_wrong_direction_rejected(self):
         ok, code, _ = validate_edge("HAS_SKILL", "Skill", "Mind")
+        self.assertFalse(ok)
+        self.assertEqual(code, "invalid_edge_direction")
+
+    def test_has_education_edge_passes(self):
+        ok, _, _ = validate_edge("HAS_EDUCATION", "Person", "Education")
+        self.assertTrue(ok)
+
+    def test_has_education_wrong_direction_rejected(self):
+        ok, code, _ = validate_edge("HAS_EDUCATION", "Education", "Person")
         self.assertFalse(ok)
         self.assertEqual(code, "invalid_edge_direction")
 
