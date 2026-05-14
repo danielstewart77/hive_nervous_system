@@ -37,7 +37,7 @@ class UpsertBody(BaseModel):
     entity_type: str
     name: str
     data_class: str
-    agent_id: str
+    mind_id: str
     properties: str = "{}"
     relation: str = ""
     target_name: str = ""
@@ -48,12 +48,12 @@ class UpsertBody(BaseModel):
 
 
 class AuditPersonsBody(BaseModel):
-    agent_id: str
+    mind_id: str
 
 
 class UpdatePersonNamesBody(BaseModel):
     name: str
-    agent_id: str
+    mind_id: str
     first_name: str = ""
     last_name: str = ""
 
@@ -65,7 +65,7 @@ class NodeCreateBody(BaseModel):
     entity_type: str
     name: str
     data_class: str
-    agent_id: str
+    mind_id: str
     properties: str = "{}"
     as_of: str | None = None
     source: str = "user"
@@ -98,7 +98,7 @@ class EdgeBody(BaseModel):
     relation: str
     edge_attrs: str = "{}"
     data_class: str = ""
-    agent_id: str = ""
+    mind_id: str = ""
     as_of: str | None = None
     source: str = "user"
 
@@ -109,17 +109,17 @@ class EdgeBody(BaseModel):
 @router.get("/query")
 def graph_query(
     entity_name: str = Query(...),
-    agent_id: str = Query(""),
+    mind_id: str = Query(""),
     depth: int = Query(1, ge=1, le=3),
 ) -> Any:
     """Retrieve graph node(s) and connected relationships.
 
-    `agent_id` is accepted for backward compatibility but ignored — reads
+    `mind_id` is accepted for backward compatibility but ignored — reads
     are not partitioned by mind. Every mind sees every node.
     """
     from lucent_api.lucent_graph import graph_query as _graph_query
 
-    return _decode(_graph_query(entity_name=entity_name, agent_id=agent_id, depth=depth))
+    return _decode(_graph_query(entity_name=entity_name, mind_id=mind_id, depth=depth))
 
 
 @router.get("/search")
@@ -138,7 +138,7 @@ def graph_search(
 
 @router.get("/person/search")
 def search_person(
-    agent_id: str = Query(""),
+    mind_id: str = Query(""),
     first_name: str = Query(""),
     last_name: str = Query(""),
     title: str = Query(""),
@@ -146,7 +146,7 @@ def search_person(
 ) -> Any:
     """Fuzzy person search by name fragments, title, or relationship.
 
-    `agent_id` accepted for backward compatibility but ignored.
+    `mind_id` accepted for backward compatibility but ignored.
     """
     from lucent_api.lucent_graph import search_person as _search_person
 
@@ -156,7 +156,7 @@ def search_person(
             last_name=last_name,
             title=title,
             relationship=relationship,
-            agent_id=agent_id,
+            mind_id=mind_id,
         )
     )
 
@@ -192,7 +192,7 @@ def graph_upsert(body: UpsertBody) -> Any:
         if not allowed:
             return {"upserted": False, "reason": orphan_msg}
 
-        disambig = check_disambiguation(body.name, body.entity_type, body.agent_id)
+        disambig = check_disambiguation(body.name, body.entity_type, body.mind_id)
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
             return {
@@ -210,7 +210,7 @@ def graph_upsert(body: UpsertBody) -> Any:
                 target_name=body.target_name,
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
-                agent_id=body.agent_id,
+                mind_id=body.mind_id,
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -284,7 +284,7 @@ def graph_upsert_strict(body: UpsertBody) -> Any:
         if not allowed:
             return {"ok": False, "code": "orphan_blocked", "detail": orphan_msg}
 
-        disambig = check_disambiguation(body.name, body.entity_type, body.agent_id)
+        disambig = check_disambiguation(body.name, body.entity_type, body.mind_id)
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
             return {
@@ -304,7 +304,7 @@ def graph_upsert_strict(body: UpsertBody) -> Any:
                 target_name=body.target_name,
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
-                agent_id=body.agent_id,
+                mind_id=body.mind_id,
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -430,7 +430,7 @@ def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
             target_name=body.target_name,
             target_type=body.target_type,
             edge_attrs=body.edge_attrs,
-            agent_id=body.agent_id,
+            mind_id=body.mind_id,
             data_class=body.data_class,
             as_of=body.as_of,
             source=body.source,
@@ -459,7 +459,7 @@ def graph_nodes_create(body: NodeCreateBody) -> Any:
             entity_type=body.entity_type,
             name=body.name,
             data_class=body.data_class,
-            agent_id=body.agent_id,
+            mind_id=body.mind_id,
             properties=body.properties,
             as_of=body.as_of,
             source=body.source,
@@ -521,7 +521,7 @@ def graph_edges_create(body: EdgeBody) -> Any:
             relation=body.relation,
             edge_attrs=body.edge_attrs,
             data_class=body.data_class,
-            agent_id=body.agent_id,
+            mind_id=body.mind_id,
             as_of=body.as_of,
             source=body.source,
         )
@@ -565,7 +565,7 @@ def audit_persons(body: AuditPersonsBody) -> Any:
     """Audit Person nodes for missing first/last name properties."""
     from lucent_api.lucent_graph import audit_person_nodes
 
-    return _decode(audit_person_nodes(agent_id=body.agent_id))
+    return _decode(audit_person_nodes(mind_id=body.mind_id))
 
 
 @router.post("/persons/update-names")
@@ -578,7 +578,7 @@ def update_person_names(body: UpdatePersonNamesBody) -> Any:
             name=body.name,
             first_name=body.first_name,
             last_name=body.last_name,
-            agent_id=body.agent_id,
+            mind_id=body.mind_id,
         )
     )
 
@@ -586,7 +586,7 @@ def update_person_names(body: UpdatePersonNamesBody) -> Any:
 @router.get("/raw-properties")
 def graph_raw_properties(
     name: str = Query(...),
-    agent_id: str = Query(""),
+    mind_id: str = Query(""),
 ) -> dict:
     """Return a node's raw properties blob, unflattened.
 
@@ -596,17 +596,17 @@ def graph_raw_properties(
     `type`). The standard `/graph/query` flattens column values over inner
     blob keys, so collision-prone keys are silently overwritten on reads.
 
-    `agent_id` accepted for backward compatibility but ignored.
+    `mind_id` accepted for backward compatibility but ignored.
 
     Response shape:
-      - `{"found": true, "properties": {...}, "agent_id": "..."}` — node exists.
+      - `{"found": true, "properties": {...}, "mind_id": "..."}` — node exists.
       - `{"found": false}` — no matching node.
     """
     from lucent_api.lucent import _get_connection
 
     conn = _get_connection()
     row = conn.execute(
-        "SELECT type, properties, agent_id FROM nodes WHERE LOWER(name)=LOWER(?) LIMIT 1",
+        "SELECT type, properties, mind_id FROM nodes WHERE LOWER(name)=LOWER(?) LIMIT 1",
         (name,),
     ).fetchone()
     if row is None:
@@ -615,10 +615,10 @@ def graph_raw_properties(
         blob = json.loads(row["properties"]) if row["properties"] else {}
     except (TypeError, ValueError):
         blob = {}
-    # agent_id is writer-provenance — surface only on Mind nodes.
+    # mind_id is writer-provenance — surface only on Mind nodes.
     result = {"found": True, "properties": blob}
     if row["type"] == "Mind":
-        result["agent_id"] = row["agent_id"]
+        result["mind_id"] = row["mind_id"]
     return result
 
 

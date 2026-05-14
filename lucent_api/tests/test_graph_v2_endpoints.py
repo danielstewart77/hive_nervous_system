@@ -25,7 +25,7 @@ def _make_test_conn() -> sqlite3.Connection:
     conn.executescript("""
         CREATE TABLE nodes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id    TEXT    NOT NULL,
+            mind_id    TEXT    NOT NULL,
             type        TEXT    NOT NULL,
             name        TEXT    NOT NULL,
             first_name  TEXT,
@@ -40,7 +40,7 @@ def _make_test_conn() -> sqlite3.Connection:
         );
         CREATE TABLE edges (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id    TEXT    NOT NULL,
+            mind_id    TEXT    NOT NULL,
             source_id   INTEGER NOT NULL,
             target_id   INTEGER NOT NULL,
             type        TEXT    NOT NULL,
@@ -56,14 +56,14 @@ def _make_test_conn() -> sqlite3.Connection:
     return conn
 
 
-def _seed_person(conn, name, first_name=None, last_name=None, props=None, agent_id="testmind"):
+def _seed_person(conn, name, first_name=None, last_name=None, props=None, mind_id="testmind"):
     now = time.time()
     conn.execute(
-        "INSERT INTO nodes (agent_id, type, name, first_name, last_name, properties, "
+        "INSERT INTO nodes (mind_id, type, name, first_name, last_name, properties, "
         "data_class, tier, source, as_of, created_at, updated_at) "
         "VALUES (?, 'Person', ?, ?, ?, ?, 'current-state', 'contextual', 'user', "
         "'2026-05-12T00:00:00Z', ?, ?)",
-        (agent_id, name, first_name, last_name, json.dumps(props or {}), now, now),
+        (mind_id, name, first_name, last_name, json.dumps(props or {}), now, now),
     )
     conn.commit()
     return conn.execute("SELECT id FROM nodes WHERE name=? AND type='Person'", (name,)).fetchone()["id"]
@@ -76,7 +76,7 @@ class NodeCreateTests(unittest.TestCase):
             from lucent_api.lucent_graph import graph_node_create
             result = json.loads(graph_node_create(
                 entity_type="Person", name="NewPerson",
-                data_class="current-state", agent_id="testmind",
+                data_class="current-state", mind_id="testmind",
                 properties='{"title": "Engineer"}',
             ))
         self.assertTrue(result["ok"])
@@ -92,7 +92,7 @@ class NodeCreateTests(unittest.TestCase):
             from lucent_api.lucent_graph import graph_node_create
             result = json.loads(graph_node_create(
                 entity_type="Person", name="Existing",
-                data_class="current-state", agent_id="testmind",
+                data_class="current-state", mind_id="testmind",
             ))
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "exists")
@@ -233,7 +233,7 @@ class EdgeCreateTests(unittest.TestCase):
                 source_name="Manny", source_type="Person",
                 target_name="Zoe", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
-                agent_id="testmind",
+                mind_id="testmind",
             ))
         self.assertTrue(result["ok"])
         after = conn.execute("SELECT properties FROM nodes WHERE id=?", (manny_id,)).fetchone()["properties"]
@@ -253,7 +253,7 @@ class EdgeCreateTests(unittest.TestCase):
                 source_name="Ghost", source_type="Person",
                 target_name="Target", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
-                agent_id="testmind",
+                mind_id="testmind",
             ))
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "source_not_found")
@@ -268,13 +268,13 @@ class EdgeCreateTests(unittest.TestCase):
                 source_name="Manny", source_type="Person",
                 target_name="Zoe", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
-                agent_id="testmind",
+                mind_id="testmind",
             ))
             second = json.loads(graph_edge_create(
                 source_name="Manny", source_type="Person",
                 target_name="Zoe", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
-                agent_id="testmind",
+                mind_id="testmind",
             ))
         self.assertTrue(first["ok"])
         self.assertFalse(second["ok"])
@@ -287,7 +287,7 @@ class EdgeDeleteTests(unittest.TestCase):
         manny_id = _seed_person(conn, "Manny")
         zoe_id = _seed_person(conn, "Zoe")
         conn.execute(
-            "INSERT INTO edges (agent_id, source_id, target_id, type, created_at) "
+            "INSERT INTO edges (mind_id, source_id, target_id, type, created_at) "
             "VALUES ('testmind', ?, ?, 'PARENT_OF', ?)",
             (manny_id, zoe_id, time.time()),
         )
@@ -314,12 +314,12 @@ class NodeDeleteTests(unittest.TestCase):
         now = time.time()
         # Manny has both inbound and outbound edges; both should be cascaded.
         conn.execute(
-            "INSERT INTO edges (agent_id, source_id, target_id, type, created_at) "
+            "INSERT INTO edges (mind_id, source_id, target_id, type, created_at) "
             "VALUES ('testmind', ?, ?, 'PARENT_OF', ?)",
             (manny_id, zoe_id, now),
         )
         conn.execute(
-            "INSERT INTO edges (agent_id, source_id, target_id, type, created_at) "
+            "INSERT INTO edges (mind_id, source_id, target_id, type, created_at) "
             "VALUES ('testmind', ?, ?, 'FRIEND_OF', ?)",
             (carl_id, manny_id, now),
         )

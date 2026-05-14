@@ -75,10 +75,10 @@ All bearer-gated except `/health`.
 | `GET /memory/list?tier=<t>&offset=<n>&limit=<n>` | list entries; optional `tier=` server-side filter |
 | `GET /memory/retrieve?query=<q>&data_class=<c>&k=<n>&min_score=<s>` | semantic search |
 | `GET /memory/recent-decayed?limit=<n>` | top-N by recency-decay score |
-| `POST /memory/store` | write — body `{content, data_class, tier, agent_id, source}` |
+| `POST /memory/store` | write — body `{content, data_class, tier, mind_id, source}` |
 | `PUT /memory/{id}` | update content / data_class / tags |
 | `DELETE /memory/{id}` | delete |
-| `GET /graph/query?entity_name=<name>&agent_id=<id>&depth=<n>` | identity lookup |
+| `GET /graph/query?entity_name=<name>&mind_id=<id>&depth=<n>` | identity lookup |
 | `GET /graph/search?text=<q>&limit=<n>` | mention search |
 | `POST /graph/upsert` | write node + optional edge (with orphan/disambiguation guards) |
 | `POST /graph/upsert-direct` | write node directly (skips orphan/disambiguation guards; identity guard still applies) |
@@ -88,7 +88,7 @@ All bearer-gated except `/health`.
 ```sql
 CREATE TABLE memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id TEXT NOT NULL,
+    mind_id TEXT NOT NULL,
     content TEXT NOT NULL,
     embedding BLOB NOT NULL,
     tags TEXT,
@@ -105,19 +105,19 @@ CREATE TABLE memories (
 
 CREATE TABLE nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id TEXT NOT NULL,
+    mind_id TEXT NOT NULL,
     type TEXT NOT NULL,             -- 'Mind' for identity nodes
     name TEXT NOT NULL,
     first_name TEXT, last_name TEXT,
     properties TEXT DEFAULT '{}',
     data_class TEXT, tier TEXT, source TEXT,
     as_of TEXT, created_at REAL, updated_at REAL,
-    UNIQUE(agent_id, name)
+    UNIQUE(mind_id, name)
 );
 
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id TEXT, source_id INTEGER, target_id INTEGER,
+    mind_id TEXT, source_id INTEGER, target_id INTEGER,
     type TEXT, as_of TEXT, source TEXT,
     data_class TEXT, tier TEXT, created_at REAL
 );
@@ -198,7 +198,7 @@ file format changes.
 
 ### Identity convention
 
-`agent_id` is a provenance column in lucent (memories, nodes, edges) — it
+`mind_id` is a provenance column in lucent (memories, nodes, edges) — it
 does not gate reads, but it does identify which mind wrote each row.
 **Two values are not interchangeable** even though both are stored as
 `TEXT`:
@@ -206,22 +206,22 @@ does not gate reads, but it does identify which mind wrote each row.
 | Concept | Variable | Example | Purpose |
 |---|---|---|---|
 | Short name | `MIND_ID` | `ada`, `bob`, `bilby`, `nagatha` | Human-readable label for logs, hook output dirs, container names. **Never written to lucent.** |
-| Canonical id | `MIND_AGENT_ID` | `565e5a66-d20c-4266-872a-3268c4c894fc` (a UUID for registry-managed minds) or a literal string for unmanaged minds (currently `"skippy"`) | The value used in every `agent_id` field — `/memory/store`, `/graph/upsert`, `/graph/query?agent_id=…`, all SQL provenance columns. |
+| Canonical id | `MIND_ID` | `565e5a66-d20c-4266-872a-3268c4c894fc` (a UUID for registry-managed minds) or a literal string for unmanaged minds (currently `"skippy"`) | The value used in every `mind_id` field — `/memory/store`, `/graph/upsert`, `/graph/query?mind_id=…`, all SQL provenance columns. |
 
 Why two: `core/sessions.py` issues a UUID when a session is created for a
 mind the registry knows about. The registry is the source of truth for
-the canonical id, not the short name. Hardcoding `agent_id="ada"` writes
-a different identity than the registry's `agent_id="565e5a66-…"`, and
+the canonical id, not the short name. Hardcoding `mind_id="ada"` writes
+a different identity than the registry's `mind_id="565e5a66-…"`, and
 the resulting rows look like a different mind to every later read,
 prune, and overflow check.
 
 Lookup the canonical value once per mind:
 
 ```sql
-SELECT agent_id FROM nodes WHERE type='Mind' AND name='Ada';
+SELECT mind_id FROM nodes WHERE type='Mind' AND name='Ada';
 ```
 
-That value goes in compose env as `MIND_AGENT_ID` and propagates from
+That value goes in compose env as `MIND_ID` and propagates from
 there to every hook, skill, and Python caller in the mind container.
 
 A mind that has no registry entry (Skippy today) uses a stable literal
@@ -243,7 +243,7 @@ reference and is passed into the container via `env_file:` or
 ```
 # Identity (see § Identity convention above)
 MIND_ID=<short name>                     # human-readable: ada, bob, bilby, nagatha
-MIND_AGENT_ID=<canonical id>             # UUID from registry (or literal string for unmanaged minds)
+MIND_ID=<canonical id>             # UUID from registry (or literal string for unmanaged minds)
 
 # Reach the shared nervous system (joined onto the hivemind docker network)
 LUCENT_URL=http://hive-lucent:8424
@@ -264,8 +264,8 @@ ROTATION_TOKEN_THRESHOLD=300000          # 30% of 1M context
 CHARS_PER_TOKEN=4
 ```
 
-Hooks read `MIND_AGENT_ID` (not `MIND_ID`) when populating any
-`agent_id=…` field on the lucent API. `MIND_ID` is for log paths and
+Hooks read `MIND_ID` (not `MIND_ID`) when populating any
+`mind_id=…` field on the lucent API. `MIND_ID` is for log paths and
 display only.
 
 The mind container must be attached to the `hivemind` external network
@@ -411,32 +411,32 @@ Skills (under `~/.claude/skills/`):
 
 ### Step 6 — Identity node
 
-The mind needs an identity node in the shared KG. The node's `agent_id`
-must be the canonical id (`MIND_AGENT_ID` — see § Identity convention),
+The mind needs an identity node in the shared KG. The node's `mind_id`
+must be the canonical id (`MIND_ID` — see § Identity convention),
 not the short name. First-time setup:
 
 ```sql
 -- Run inside the shared container or via a one-shot script.
--- :MIND_AGENT_ID is the registry-issued UUID (or the literal short
+-- :MIND_ID is the registry-issued UUID (or the literal short
 -- name for unmanaged minds — currently 'skippy').
-INSERT INTO nodes (agent_id, type, name, properties, data_class, tier, source, created_at, updated_at)
-VALUES (:MIND_AGENT_ID, 'Mind', '<MindName>',
+INSERT INTO nodes (mind_id, type, name, properties, data_class, tier, source, created_at, updated_at)
+VALUES (:MIND_ID, 'Mind', '<MindName>',
         json_object('soul_values', json_array('<bullet 1>', '<bullet 2>', ...)),
         'current-state', 'contextual', 'user',
         strftime('%s','now'), strftime('%s','now'));
 ```
 
 Or — if there's an existing soul file — use the same shape and seed via
-a small Python script that resolves `MIND_AGENT_ID` from the registry
+a small Python script that resolves `MIND_ID` from the registry
 first. The identity-node guard (`_check_identity_guard` in
 `lucent_graph.py`) keys on `type='Mind'`, so this matters: if you write
 the node as `type='Person'`, no guard.
 
 Verify the seed by name and capture the canonical id back, so callers
-that need `MIND_AGENT_ID` can pull it from a single trusted source:
+that need `MIND_ID` can pull it from a single trusted source:
 
 ```sql
-SELECT agent_id FROM nodes WHERE type='Mind' AND name='<MindName>';
+SELECT mind_id FROM nodes WHERE type='Mind' AND name='<MindName>';
 ```
 
 ### Step 7 — Verify
@@ -469,13 +469,13 @@ Before declaring a mind successfully integrated:
 Hard-won lessons. These are durable across minds and worth surfacing
 upfront for the next adopter.
 
-### Identity (`agent_id` vs `MIND_ID`)
+### Identity (`mind_id` vs `MIND_ID`)
 
 - `MIND_ID` is the human-readable short name (`ada`, `bob`, `bilby`, `nagatha`). Used for log paths, container names, display.
-- `MIND_AGENT_ID` is the canonical id written to lucent. For registry-managed minds it is a UUID issued by `core/sessions.py`; for unmanaged minds it is a stable literal string (currently only `"skippy"`).
-- **Never write the short name to lucent.** Hardcoding `agent_id="ada"` from a Python caller, a hook, or a SQL seed creates a *second*, parallel mind identity that diverges from the registry. Every later read, prune, and identity-guard check sees a different mind.
+- `MIND_ID` is the canonical id written to lucent. For registry-managed minds it is a UUID issued by `core/sessions.py`; for unmanaged minds it is a stable literal string (currently only `"skippy"`).
+- **Never write the short name to lucent.** Hardcoding `mind_id="ada"` from a Python caller, a hook, or a SQL seed creates a *second*, parallel mind identity that diverges from the registry. Every later read, prune, and identity-guard check sees a different mind.
 - The lucent schema column is `TEXT`; the database does not enforce the convention. This is purely an upstream-discipline issue.
-- Resolve once via `SELECT agent_id FROM nodes WHERE type='Mind' AND name='<MindName>'`, then propagate via env (`MIND_AGENT_ID=…`).
+- Resolve once via `SELECT mind_id FROM nodes WHERE type='Mind' AND name='<MindName>'`, then propagate via env (`MIND_ID=…`).
 
 ### `lucent /memory/store`
 
@@ -494,7 +494,7 @@ upfront for the next adopter.
 
 - Caps `limit` at 100 (returns 422 above).
 - Use `tier=<tier>` server-side filter to avoid client-side pagination across the full store. Both bootstrap (standing rules) and overflow audit rely on it.
-- `agent_id` query param is accepted for backwards compat but ignored — provenance only, not a query filter (REQ-018).
+- `mind_id` query param is accepted for backwards compat but ignored — provenance only, not a query filter (REQ-018).
 
 ### `lucent /graph/query`
 
@@ -504,7 +504,7 @@ upfront for the next adopter.
 
 ### `lucent /graph/upsert`
 
-- **Full-replace** semantics on the `properties` JSON blob (`ON CONFLICT(agent_id, name) DO UPDATE SET properties = excluded.properties, ...`). Anything not passed back is wiped.
+- **Full-replace** semantics on the `properties` JSON blob (`ON CONFLICT(mind_id, name) DO UPDATE SET properties = excluded.properties, ...`). Anything not passed back is wiped.
 - The `properties` field on the request body is a **string-encoded JSON**, not an object. The server `json.loads()` it.
 - The API flattens column values over inner-blob keys when reading. To preserve unrelated keys when round-tripping, **read the raw blob via direct sqlite** (not the API), augment, write back the full string.
 - **Never smoke-test with `properties: "{}"` against an existing node** — empty blob wipes everything (soul_values included). Always pass the full existing blob plus your changes.

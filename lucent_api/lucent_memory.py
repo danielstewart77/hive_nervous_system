@@ -130,7 +130,7 @@ def memory_store_direct(
     tier: str = "contextual",
     tags: str = "",
     source: str = "user",
-    agent_id: str = "ada",
+    mind_id: str = "ada",
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
@@ -193,14 +193,14 @@ def memory_store_direct(
         cursor = conn.execute(
             """
             INSERT INTO memories (
-                agent_id, content, embedding, tags, source,
+                mind_id, content, embedding, tags, source,
                 data_class, tier, as_of, expires_at,
                 superseded, recurring, codebase_ref, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                agent_id, content, embedding_blob, tags,
+                mind_id, content, embedding_blob, tags,
                 meta.get("source", source),
                 meta.get("data_class"), tier, meta.get("as_of"),
                 meta.get("expires_at"),
@@ -216,7 +216,7 @@ def memory_store_direct(
         return json.dumps({
             "stored": True,
             "id": memory_id,
-            "agent_id": agent_id,
+            "mind_id": mind_id,
             "data_class": meta.get("data_class"),
             "tier": tier,
         })
@@ -232,7 +232,7 @@ def memory_store(
     tier: str = "contextual",
     tags: str = "",
     source: str = "user",
-    agent_id: str = "ada",
+    mind_id: str = "ada",
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
@@ -248,8 +248,8 @@ def memory_store(
             sources is allowed at this layer but discouraged.
         tags: Comma-separated tags for categorisation.
         source: Origin of the memory -- "user", "tool", "session", "self".
-        agent_id: Which agent this memory belongs to (default "ada"). Stored
-            as provenance only — reads do not filter by agent_id.
+        mind_id: Which agent this memory belongs to (default "ada"). Stored
+            as provenance only — reads do not filter by mind_id.
         as_of: ISO datetime for when the fact was established.
         expires_at: ISO datetime for when a timed-event expires.
         recurring: Explicit recurring flag for timed-events.
@@ -266,7 +266,7 @@ def memory_store(
             tier=tier,
             tags=tags,
             source=source,
-            agent_id=agent_id,
+            mind_id=mind_id,
             data_class=data_class,
             as_of=as_of,
             expires_at=expires_at,
@@ -281,7 +281,7 @@ def memory_store(
 def memory_list(
     offset: int = 0,
     limit: int = 25,
-    agent_id: str = "ada",
+    mind_id: str = "ada",
     tier: str | None = None,
 ) -> str:
     """List all memories sequentially by creation time for review and cleanup.
@@ -289,7 +289,7 @@ def memory_list(
     Args:
         offset: Number of entries to skip (for pagination).
         limit: Number of entries to return (default 25, max 100).
-        agent_id: Accepted for backwards compatibility but ignored — agent_id
+        mind_id: Accepted for backwards compatibility but ignored — mind_id
             is provenance only and does not filter reads (REQ-006).
         tier: Optional filter — when set, only entries matching this tier
             are returned (and counted in total). Useful for the bootstrap
@@ -299,7 +299,7 @@ def memory_list(
     Returns:
         JSON with entries, offset, limit, and total count.
     """
-    del agent_id  # REQ-006: agent_id is not a query filter on reads.
+    del mind_id  # REQ-006: mind_id is not a query filter on reads.
     limit = min(limit, 100)
     try:
         conn = _get_conn()
@@ -316,7 +316,7 @@ def memory_list(
         if tier:
             rows = conn.execute(
                 """
-                SELECT id, content, tags, source, data_class, tier, agent_id, created_at
+                SELECT id, content, tags, source, data_class, tier, mind_id, created_at
                 FROM memories
                 WHERE tier = ?
                 ORDER BY created_at ASC
@@ -327,7 +327,7 @@ def memory_list(
         else:
             rows = conn.execute(
                 """
-                SELECT id, content, tags, source, data_class, tier, agent_id, created_at
+                SELECT id, content, tags, source, data_class, tier, mind_id, created_at
                 FROM memories
                 ORDER BY created_at ASC
                 LIMIT ? OFFSET ?
@@ -343,7 +343,7 @@ def memory_list(
                 "source": row["source"],
                 "data_class": row["data_class"],
                 "tier": row["tier"],
-                "agent_id": row["agent_id"],
+                "mind_id": row["mind_id"],
                 "created_at": row["created_at"],
             }
             for row in rows
@@ -367,7 +367,7 @@ def memory_delete(memory_id: str) -> str:
     try:
         conn = _get_conn()
         row = conn.execute(
-            "SELECT id, content, agent_id FROM memories WHERE id = ?",
+            "SELECT id, content, mind_id FROM memories WHERE id = ?",
             (int(memory_id),),
         ).fetchone()
 
@@ -466,7 +466,7 @@ def memory_update(
 def memory_retrieve(
     query: str,
     k: int = 10,
-    agent_id: str = "ada",
+    mind_id: str = "ada",
     tag_filter: Optional[str] = None,
     data_class: Optional[str] = None,
     min_score: Optional[float] = None,
@@ -476,7 +476,7 @@ def memory_retrieve(
     Args:
         query: Natural language query to search for related memories.
         k: Number of results to return (default 10, max 50).
-        agent_id: Accepted for backwards compatibility but ignored — agent_id
+        mind_id: Accepted for backwards compatibility but ignored — mind_id
             is provenance only and does not filter reads (REQ-006).
         tag_filter: Optional tag to filter results.
         data_class: Optional data class filter — keep only entries with the
@@ -487,7 +487,7 @@ def memory_retrieve(
     Returns:
         JSON array of memories sorted by relevance (highest first).
     """
-    del agent_id  # REQ-006: agent_id is not a query filter on reads.
+    del mind_id  # REQ-006: mind_id is not a query filter on reads.
     k = min(k, 50)
     try:
         query_embedding = np.array(_embed(query), dtype=np.float32)
@@ -498,7 +498,7 @@ def memory_retrieve(
         if tag_filter:
             rows = conn.execute(
                 """
-                SELECT id, content, embedding, tags, source, agent_id,
+                SELECT id, content, embedding, tags, source, mind_id,
                        created_at, data_class, tier, as_of, expires_at,
                        superseded, codebase_ref
                 FROM memories
@@ -509,7 +509,7 @@ def memory_retrieve(
         else:
             rows = conn.execute(
                 """
-                SELECT id, content, embedding, tags, source, agent_id,
+                SELECT id, content, embedding, tags, source, mind_id,
                        created_at, data_class, tier, as_of, expires_at,
                        superseded, codebase_ref
                 FROM memories
@@ -538,7 +538,7 @@ def memory_retrieve(
                 "content": row["content"],
                 "tags": row["tags"],
                 "source": row["source"],
-                "agent_id": row["agent_id"],
+                "mind_id": row["mind_id"],
                 "created_at": row["created_at"],
                 "score": round(score, 4),
                 "data_class": row["data_class"],
@@ -577,7 +577,7 @@ def query_decayed(limit: int = 20) -> str:
 
     Returns:
         JSON-encoded list of dicts: id, content, data_class, score,
-        created_at, agent_id.
+        created_at, mind_id.
     """
     import math
 
@@ -585,7 +585,7 @@ def query_decayed(limit: int = 20) -> str:
         conn = _get_conn()
         rows = conn.execute(
             """
-            SELECT id, content, data_class, agent_id, created_at
+            SELECT id, content, data_class, mind_id, created_at
             FROM memories
             WHERE tier = 'contextual'
             """
@@ -604,7 +604,7 @@ def query_decayed(limit: int = 20) -> str:
                 "id": row["id"],
                 "content": row["content"],
                 "data_class": row["data_class"],
-                "agent_id": row["agent_id"],
+                "mind_id": row["mind_id"],
                 "created_at": row["created_at"],
                 "score": round(score, 4),
             })

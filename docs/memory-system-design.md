@@ -110,7 +110,7 @@ Two strategies, use both:
 
 ### 5. Inter-mind memory needs governance from day one
 
-Each mind currently siloed by `agent_id`. If a shared pool ever lands, design the boundaries first:
+Each mind currently siloed by `mind_id`. If a shared pool ever lands, design the boundaries first:
 
 - **Per-mind private** — siloed (current state)
 - **Shared public** — one canonical pool, all minds read/write
@@ -209,13 +209,13 @@ This is a hive mind, not a federation of silos. The default access model is **sh
 
 | Store | Read | Write |
 |---|---|---|
-| Vector store | Every mind reads everything. No `agent_id` filter on reads. | Every mind writes anywhere. A coding-mind running Claude can update an embedding originally written by a coding-mind running Codex if the underlying code changed. |
+| Vector store | Every mind reads everything. No `mind_id` filter on reads. | Every mind writes anywhere. A coding-mind running Claude can update an embedding originally written by a coding-mind running Codex if the underlying code changed. |
 | Knowledge graph — own identity node | Every mind reads | Only the mind itself writes |
 | Knowledge graph — all other nodes | Every mind reads | Every mind writes |
 
 The only enforced isolation is "you cannot edit another mind's identity node." Everything else is open. The rationale: shared knowledge is the entire point. A fact known to one mind should be reachable by every other mind. The vector store and the non-identity portion of the knowledge graph are the hive's shared brain.
 
-`agent_id` is preserved as **provenance metadata** — every entry records which mind wrote it — but is not used as an access filter. Provenance helps with auditing and dedup; it is not a security boundary.
+`mind_id` is preserved as **provenance metadata** — every entry records which mind wrote it — but is not used as an access filter. Provenance helps with auditing and dedup; it is not a security boundary.
 
 ---
 
@@ -624,7 +624,7 @@ Codex minds) does the work in a detached background subshell:
    schema.
 6. If the verdict's action is `save-vector`: POST to
    `${LUCENT_URL}/memory/store` with `tier=contextual,
-   source=session, agent_id=${MIND_AGENT_ID}` (the canonical id, not
+   source=session, mind_id=${MIND_ID}` (the canonical id, not
    the short name — see implementation.md § Identity convention).
    Other actions and discards are logged without a save.
 7. Append one JSON line summarising the run (status, data_class,

@@ -39,7 +39,7 @@ def _telegram_direct(message: str) -> tuple[bool, str]:
 
 
 def check_disambiguation(
-    name: str, entity_type: str, agent_id: str
+    name: str, entity_type: str, mind_id: str
 ) -> DisambiguationResult:
     """Query the knowledge graph for similar nodes before writing.
 
@@ -52,7 +52,7 @@ def check_disambiguation(
             filter -- the CONTAINS name match is cross-type so that duplicates
             across entity types are caught (e.g. a Person and a System sharing
             a name).
-        agent_id: Which agent's graph to search.
+        mind_id: Which agent's graph to search.
 
     Returns:
         DisambiguationResult with action, existing_nodes, and message.
@@ -60,11 +60,11 @@ def check_disambiguation(
     # NOTE: entity_type is intentionally omitted from the SQL WHERE clause.
     # Disambiguation must check across all node types to catch cross-entity
     # duplicates (e.g. "Hive Mind" as both a Project and a System).
-    # agent_id is also omitted (REQ-018): it is provenance only, not a query
+    # mind_id is also omitted (REQ-018): it is provenance only, not a query
     # filter. Disambiguation is cross-mind so any mind catches duplicates
     # written by any other mind. The parameter is retained for API
     # consistency.
-    del agent_id  # intentionally unused
+    del mind_id  # intentionally unused
     conn = _get_connection()
     cursor = conn.execute(
         """

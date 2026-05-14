@@ -2,7 +2,7 @@
 
 Containerized vector store + knowledge graph (lucent) shared across every mind in the [Hive Mind](https://github.com/danielstewart77/hive_mind) ecosystem.
 
-This is the **data plane** — minds (Ada, Bob, Bilby, Nagatha, Skippy) hold no lucent code. They reach this service over HTTP with a bearer token. One database, many writers, provenance recorded per write but no `agent_id` filter on reads (every mind sees everything).
+This is the **data plane** — minds (Ada, Bob, Bilby, Nagatha, Skippy) hold no lucent code. They reach this service over HTTP with a bearer token. One database, many writers, provenance recorded per write but no `mind_id` filter on reads (every mind sees everything).
 
 ## What's in here
 
@@ -40,19 +40,19 @@ All bearer-gated except `/health`.
 | `GET /memory/list?tier=<t>&offset=<n>&limit=<n>` | list entries; optional `tier=` server-side filter |
 | `GET /memory/retrieve?query=<q>&data_class=<c>&k=<n>&min_score=<s>` | semantic search |
 | `GET /memory/recent-decayed?limit=<n>` | top-N by recency-decay score |
-| `POST /memory/store` | write — body `{content, data_class, tier, agent_id, source}` |
+| `POST /memory/store` | write — body `{content, data_class, tier, mind_id, source}` |
 | `PUT /memory/{id}` | update content / data_class / tags |
 | `DELETE /memory/{id}` | delete |
-| `GET /graph/query?entity_name=<name>&agent_id=<id>&depth=<n>` | identity lookup |
+| `GET /graph/query?entity_name=<name>&mind_id=<id>&depth=<n>` | identity lookup |
 | `GET /graph/search?text=<q>&limit=<n>` | mention search |
-| `GET /graph/raw-properties?name=<n>&agent_id=<a>` | unflattened properties blob (round-trip safe) |
+| `GET /graph/raw-properties?name=<n>&mind_id=<a>` | unflattened properties blob (round-trip safe) |
 | `GET /graph/data?limit=<n>` | visualization export — flat nodes + edges |
 | `POST /graph/upsert` | write node + optional edge (with orphan/disambiguation guards) |
 | `POST /graph/upsert-direct` | write node directly (skips orphan/disambiguation guards; identity guard still applies) |
 
 ## Identity convention
 
-Every write must populate `agent_id` with the **canonical mind id** — for registry-managed minds this is a UUID issued by the consuming mind's session manager. Hardcoding short names (`"ada"`, `"bob"`) creates parallel identities that diverge from the registry. The schema column is `TEXT`; the database does not enforce the rule. See the consuming side's docs.
+Every write must populate `mind_id` with the **canonical mind id** — for registry-managed minds this is a UUID issued by the consuming mind's session manager. Hardcoding short names (`"ada"`, `"bob"`) creates parallel identities that diverge from the registry. The schema column is `TEXT`; the database does not enforce the rule. See the consuming side's docs.
 
 ## Bearer auth
 
@@ -82,7 +82,7 @@ Run output is appended as JSONL to `/data/prune.log` inside the container.
 ```sql
 CREATE TABLE memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id TEXT NOT NULL,
+    mind_id TEXT NOT NULL,
     content TEXT NOT NULL,
     embedding BLOB NOT NULL,
     tags TEXT,
@@ -99,19 +99,19 @@ CREATE TABLE memories (
 
 CREATE TABLE nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id TEXT NOT NULL,
+    mind_id TEXT NOT NULL,
     type TEXT NOT NULL,             -- 'Mind' for identity nodes
     name TEXT NOT NULL,
     first_name TEXT, last_name TEXT,
     properties TEXT DEFAULT '{}',
     data_class TEXT, tier TEXT, source TEXT,
     as_of TEXT, created_at REAL, updated_at REAL,
-    UNIQUE(agent_id, name)
+    UNIQUE(mind_id, name)
 );
 
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id TEXT, source_id INTEGER, target_id INTEGER,
+    mind_id TEXT, source_id INTEGER, target_id INTEGER,
     type TEXT, as_of TEXT, source TEXT,
     data_class TEXT, tier TEXT, created_at REAL
 );
