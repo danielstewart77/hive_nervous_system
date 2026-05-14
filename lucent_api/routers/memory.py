@@ -31,7 +31,7 @@ def _decode(payload: str) -> Any:
 class StoreBody(BaseModel):
     content: str
     data_class: str
-    agent_id: str = "ada"
+    mind_id: str = "ada"
     tier: str = "contextual"
     tags: str = ""
     source: str = "user"
@@ -52,7 +52,7 @@ class UpdateBody(BaseModel):
 
 @router.get("/list")
 def memory_list(
-    agent_id: str = Query("ada"),
+    mind_id: str = Query("ada"),
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
     tier: str | None = Query(None),
@@ -61,7 +61,7 @@ def memory_list(
     from lucent_api.lucent_memory import memory_list as _memory_list
 
     return _decode(
-        _memory_list(offset=offset, limit=limit, agent_id=agent_id, tier=tier)
+        _memory_list(offset=offset, limit=limit, mind_id=mind_id, tier=tier)
     )
 
 
@@ -78,7 +78,7 @@ def memory_recent_decayed(
 @router.get("/retrieve")
 def memory_retrieve(
     query: str = Query(...),
-    agent_id: str = Query("ada"),
+    mind_id: str = Query("ada"),
     k: int = Query(10, ge=1, le=50),
     tag_filter: str | None = Query(None),
     data_class: str | None = Query(None),
@@ -96,7 +96,7 @@ def memory_retrieve(
         _memory_retrieve(
             query=query,
             k=k,
-            agent_id=agent_id,
+            mind_id=mind_id,
             tag_filter=tag_filter,
             data_class=data_class,
             min_score=min_score,
@@ -119,7 +119,7 @@ def memory_store(body: StoreBody) -> Any:
             tier=body.tier,
             tags=body.tags,
             source=body.source,
-            agent_id=body.agent_id,
+            mind_id=body.mind_id,
             as_of=body.as_of,
             expires_at=body.expires_at,
             recurring=body.recurring,

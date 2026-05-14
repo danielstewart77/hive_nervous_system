@@ -49,7 +49,7 @@ LUCENT_DB = Path(
         "/home/daniel/Storage/hive_mind_skippy/data/lucent.db",
     )
 )
-AGENT_ID = os.environ.get("MIND_ID", "skippy")
+MIND_ID = os.environ.get("MIND_ID", "skippy")
 REQUEST_TIMEOUT = 30
 
 # Per-class decay parameters (per the design).
@@ -81,7 +81,7 @@ def _read_class_entries(data_class: str, *, include_standing: bool = False) -> l
         log.error("lucent.db not found at %s", LUCENT_DB)
         return []
     cols = (
-        "id, content, data_class, tier, agent_id, source, "
+        "id, content, data_class, tier, mind_id, source, "
         "created_at, codebase_ref, expires_at"
     )
     where = "data_class = ?"

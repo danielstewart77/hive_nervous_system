@@ -22,6 +22,10 @@ services:
       - .env
     volumes:
       - ./data:/data
+      # Bind-mount the API source so schema additions and hot fixes don't
+      # require an image rebuild. Restart the container (no rebuild) to
+      # pick up changes.
+      - ./lucent_api:/app/lucent_api
 
 networks:
   hivemind:

@@ -20,15 +20,16 @@ from datetime import datetime, timezone
 
 import requests
 from core.memory_schema import validate_source
-from lucent_api.schema_registry import SCHEMA_TYPES
+from lucent_api.schema_registry import get_type_spec
 
 logger = logging.getLogger(__name__)
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
 HITL_TTL = 180
 
-# Allow-list is derived from the schema registry — single source of truth.
-# Add new node types by editing SCHEMA_TYPES in schema_registry.py.
+# Allow-list lives in the schema_types DB table (single runtime source of
+# truth). Register new types by POSTing /graph/schema/types — the validator
+# picks them up immediately without a restart.
 _RELATION_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -47,9 +48,13 @@ def _hitl_gate(summary: str) -> bool:
 
 
 def _validate_label(entity_type: str) -> str:
-    if entity_type not in SCHEMA_TYPES:
+    from lucent_api.lucent import _get_connection
+    from lucent_api.schema_registry import _all_type_names
+
+    conn = _get_connection()
+    if get_type_spec(conn, entity_type) is None:
         raise ValueError(
-            f"Invalid entity_type {entity_type!r}. Must be one of: {sorted(SCHEMA_TYPES)}"
+            f"Invalid entity_type {entity_type!r}. Must be one of: {_all_type_names(conn)}"
         )
     return entity_type
 
@@ -68,25 +73,25 @@ def _get_conn():
     return _get_connection()
 
 
-def _check_identity_guard(conn, name: str, agent_id: str) -> str | None:
+def _check_identity_guard(conn, name: str, mind_id: str) -> str | None:
     """Return an error string if the caller may not write to this node.
 
     A node is an identity node when its ``type`` is ``Mind``. Only the
-    mind whose ``agent_id`` matches the existing node's ``agent_id``
+    mind whose ``mind_id`` matches the existing node's ``mind_id``
     (the original creator) may update it. Returns None when the write
     is allowed: either the named node is not a Mind, or the caller is
     the owning mind, or no Mind node by this name exists yet (first
     writer claims ownership).
     """
     row = conn.execute(
-        "SELECT agent_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind' LIMIT 1",
+        "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind' LIMIT 1",
         (name,),
     ).fetchone()
     if row is None:
         return None  # not a Mind node, no guard
-    if row["agent_id"] == agent_id:
+    if row["mind_id"] == mind_id:
         return None  # caller is the owning mind
-    return f"agent_id {agent_id!r} cannot edit identity node for {name!r}"
+    return f"mind_id {mind_id!r} cannot edit identity node for {name!r}"
 
 
 def graph_upsert_direct(
@@ -99,7 +104,7 @@ def graph_upsert_direct(
     target_name: str = "",
     target_type: str = "",
     edge_attrs: str = "{}",
-    agent_id: str,
+    mind_id: str,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -129,7 +134,7 @@ def graph_upsert_direct(
         conn = _get_conn()
 
         # REQ-008: identity-node guard. A mind can only write its own identity node.
-        guard_err = _check_identity_guard(conn, name, agent_id)
+        guard_err = _check_identity_guard(conn, name, mind_id)
         if guard_err is not None:
             return json.dumps({"upserted": False, "error": guard_err})
 
@@ -168,13 +173,13 @@ def graph_upsert_direct(
         else:
             cursor = conn.execute(
                 """
-                INSERT INTO nodes (agent_id, type, name, first_name, last_name,
+                INSERT INTO nodes (mind_id, type, name, first_name, last_name,
                                    properties, data_class, tier, source, as_of,
                                    created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    agent_id, label, name, first_name, last_name,
+                    mind_id, label, name, first_name, last_name,
                     json.dumps(props), meta.get("data_class"), meta.get("tier"),
                     meta.get("source", source), meta.get("as_of"),
                     props["created_at"], props["created_at"],
@@ -214,12 +219,12 @@ def graph_upsert_direct(
             else:
                 tgt_cursor = conn.execute(
                     """
-                    INSERT INTO nodes (agent_id, type, name, properties, data_class, tier,
+                    INSERT INTO nodes (mind_id, type, name, properties, data_class, tier,
                                        source, as_of, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        agent_id, tgt_label, target_name, json.dumps(meta),
+                        mind_id, tgt_label, target_name, json.dumps(meta),
                         meta.get("data_class"), meta.get("tier"),
                         meta.get("source", source), meta.get("as_of"),
                         props["created_at"], props["created_at"],
@@ -232,7 +237,7 @@ def graph_upsert_direct(
             edge_props_json = edge_attrs if edge_attrs.strip() else "{}"
             conn.execute(
                 """
-                INSERT INTO edges (agent_id, source_id, target_id, type,
+                INSERT INTO edges (mind_id, source_id, target_id, type,
                                    as_of, source, data_class, tier, created_at, properties)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id, target_id, type) DO UPDATE SET
@@ -243,7 +248,7 @@ def graph_upsert_direct(
                     properties = excluded.properties
                 """,
                 (
-                    agent_id, node_id, target_id, rel_type,
+                    mind_id, node_id, target_id, rel_type,
                     meta.get("as_of"), meta.get("source", source),
                     meta.get("data_class"), meta.get("tier"),
                     props["created_at"], edge_props_json,
@@ -274,7 +279,7 @@ def graph_upsert(
     relation: str = "",
     target_name: str = "",
     target_type: str = "",
-    agent_id: str,
+    mind_id: str,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -287,7 +292,7 @@ def graph_upsert(
         relation: Relationship type to create (e.g. MANAGES, WORKS_ON). Leave empty for node-only.
         target_name: Name of the target node to link to. Required if relation is set.
         target_type: Entity type of the target node (defaults to entity_type if omitted).
-        agent_id: Which agent's graph this belongs to. Required.
+        mind_id: Which agent's graph this belongs to. Required.
         data_class: Data class for this entry (e.g. "person", "preference", "technical-config").
         as_of: ISO datetime for when the fact was established (defaults to now).
         source: Origin of the entry -- "user", "tool", "session", or "self".
@@ -305,7 +310,7 @@ def graph_upsert(
         if not allowed:
             return json.dumps({"upserted": False, "reason": orphan_msg})
 
-        disambig = check_disambiguation(name, entity_type, agent_id)
+        disambig = check_disambiguation(name, entity_type, mind_id)
         if disambig.action == "disambiguate":
             send_disambiguation_message(name, disambig.existing_nodes)
             return json.dumps({
@@ -332,7 +337,7 @@ def graph_upsert(
             relation=relation,
             target_name=target_name,
             target_type=target_type,
-            agent_id=agent_id,
+            mind_id=mind_id,
             data_class=data_class,
             as_of=as_of,
             source=source,
@@ -343,7 +348,7 @@ def graph_upsert(
 
 def graph_query(
     entity_name: str,
-    agent_id: str = "",
+    mind_id: str = "",
     depth: int = 1,
 ) -> str:
     """Retrieve knowledge graph node(s) and their connected relationships.
@@ -356,8 +361,8 @@ def graph_query(
 
     Args:
         entity_name: Name to look up. Empty string returns no results.
-        agent_id: Accepted for backward compatibility but ignored. Reads are
-            not partitioned by mind — every mind sees every node. agent_id
+        mind_id: Accepted for backward compatibility but ignored. Reads are
+            not partitioned by mind — every mind sees every node. mind_id
             is a write-side provenance/protection field only.
         depth: How many hops to traverse (default 1, max 3).
 
@@ -371,12 +376,12 @@ def graph_query(
         conn = _get_conn()
 
         # Identity-only match: name / first_name / last_name (exact, case-insensitive),
-        # or alias-element within the JSON aliases array. No agent_id filter —
-        # nodes are global, agent_id is provenance, not partition.
+        # or alias-element within the JSON aliases array. No mind_id filter —
+        # nodes are global, mind_id is provenance, not partition.
         alias_pattern = f'%"{entity_name}"%'
         rows = conn.execute(
             """
-            SELECT id, name, type, first_name, last_name, properties, agent_id,
+            SELECT id, name, type, first_name, last_name, properties, mind_id,
                    data_class, tier, source, as_of, created_at, updated_at
             FROM nodes
             WHERE name = ? COLLATE NOCASE
@@ -396,11 +401,11 @@ def graph_query(
             props = json.loads(row["properties"]) if row["properties"] else {}
             props["name"] = node_name
             props["type"] = row["type"]
-            # agent_id is writer-provenance, not a node attribute.
+            # mind_id is writer-provenance, not a node attribute.
             # Surface it only on Mind nodes (where it identifies the mind
             # itself); on other node types it's noise.
             if row["type"] == "Mind":
-                props["agent_id"] = row["agent_id"]
+                props["mind_id"] = row["mind_id"]
             if row["first_name"]:
                 props["first_name"] = row["first_name"]
             if row["last_name"]:
@@ -542,7 +547,7 @@ def search_person(
     title: str = "",
     relationship: str = "",
     *,
-    agent_id: str = "",
+    mind_id: str = "",
 ) -> str:
     """Search for Person nodes by any known name fragment or relationship.
 
@@ -554,7 +559,7 @@ def search_person(
         last_name: Surname fragment.
         title: Title or honorific fragment.
         relationship: How this person relates to Daniel.
-        agent_id: Accepted for backward compatibility but ignored. Reads are
+        mind_id: Accepted for backward compatibility but ignored. Reads are
             not partitioned by mind — every mind sees every Person node.
 
     Returns:
@@ -566,7 +571,7 @@ def search_person(
     try:
         conn = _get_conn()
 
-        # Build dynamic WHERE clause. No agent_id partitioning on reads.
+        # Build dynamic WHERE clause. No mind_id partitioning on reads.
         conditions = ["type = 'Person'"]
         params: list[str] = []
 
@@ -601,10 +606,10 @@ def search_person(
         for row in rows:
             props = json.loads(row["properties"]) if row["properties"] else {}
             props["name"] = row["name"]
-            # agent_id is writer-provenance — surface only on Mind nodes.
-            # search_person is Person-only, so this never returns agent_id.
+            # mind_id is writer-provenance — surface only on Mind nodes.
+            # search_person is Person-only, so this never returns mind_id.
             if row["type"] == "Mind":
-                props["agent_id"] = row["agent_id"]
+                props["mind_id"] = row["mind_id"]
             if row["first_name"]:
                 props["first_name"] = row["first_name"]
             if row["last_name"]:
@@ -620,11 +625,11 @@ def search_person(
         return json.dumps({"error": str(e)})
 
 
-def audit_person_nodes(*, agent_id: str) -> str:
+def audit_person_nodes(*, mind_id: str) -> str:
     """Find all Person nodes missing first_name or last_name properties.
 
     Args:
-        agent_id: Which agent's graph to search.
+        mind_id: Which agent's graph to search.
 
     Returns:
         JSON with found, count, and nodes list.
@@ -635,10 +640,10 @@ def audit_person_nodes(*, agent_id: str) -> str:
             """
             SELECT id, name, first_name, last_name, properties
             FROM nodes
-            WHERE type = 'Person' AND agent_id = ?
+            WHERE type = 'Person' AND mind_id = ?
               AND (first_name IS NULL OR last_name IS NULL)
             """,
-            (agent_id,),
+            (mind_id,),
         ).fetchall()
 
         if not rows:
@@ -666,7 +671,7 @@ def update_person_names(
     name: str,
     first_name: str = "",
     last_name: str = "",
-    agent_id: str,
+    mind_id: str,
 ) -> str:
     """Update first_name and/or last_name on a Person node identified by name.
 
@@ -674,7 +679,7 @@ def update_person_names(
         name: The existing name property of the Person node to update.
         first_name: Given name to set (omit or empty string to skip).
         last_name: Surname to set (omit or empty string to skip).
-        agent_id: Which agent's graph this belongs to.
+        mind_id: Which agent's graph this belongs to.
 
     Returns:
         JSON confirmation with updated status.
@@ -698,12 +703,12 @@ def update_person_names(
             params.append(last_name)
 
         set_clause = ", ".join(set_parts)
-        params.extend([name, agent_id])
+        params.extend([name, mind_id])
 
         cursor = conn.execute(
             f"""
             UPDATE nodes SET {set_clause}
-            WHERE type = 'Person' AND name = ? AND agent_id = ?
+            WHERE type = 'Person' AND name = ? AND mind_id = ?
             """,
             params,
         )
@@ -712,7 +717,7 @@ def update_person_names(
         if cursor.rowcount == 0:
             return json.dumps({
                 "updated": False,
-                "reason": f"Person node not found with name={name!r} and agent_id={agent_id!r}",
+                "reason": f"Person node not found with name={name!r} and mind_id={mind_id!r}",
             })
 
         response: dict[str, object] = {"updated": True, "name": name}
@@ -758,7 +763,7 @@ def graph_node_create(
     entity_type: str,
     name: str,
     data_class: str,
-    agent_id: str,
+    mind_id: str,
     properties: str = "{}",
     as_of: str | None = None,
     source: str = "user",
@@ -790,7 +795,7 @@ def graph_node_create(
                 "id": existing["id"],
             })
 
-        guard_err = _check_identity_guard(conn, name, agent_id)
+        guard_err = _check_identity_guard(conn, name, mind_id)
         if guard_err is not None:
             return json.dumps({"ok": False, "code": "identity_guard", "detail": guard_err})
 
@@ -808,13 +813,13 @@ def graph_node_create(
 
         cursor = conn.execute(
             """
-            INSERT INTO nodes (agent_id, type, name, first_name, last_name,
+            INSERT INTO nodes (mind_id, type, name, first_name, last_name,
                                properties, data_class, tier, source, as_of,
                                created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                agent_id, label, name, first_name, last_name,
+                mind_id, label, name, first_name, last_name,
                 json.dumps(props), meta["data_class"], meta["tier"],
                 meta["source"], meta["as_of"],
                 props["created_at"], props["created_at"],
@@ -969,7 +974,7 @@ def graph_edge_create(
     relation: str,
     edge_attrs: str = "{}",
     data_class: str,
-    agent_id: str,
+    mind_id: str,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -1008,12 +1013,12 @@ def graph_edge_create(
         try:
             cursor = conn.execute(
                 """
-                INSERT INTO edges (agent_id, source_id, target_id, type,
+                INSERT INTO edges (mind_id, source_id, target_id, type,
                                    as_of, source, data_class, tier, created_at, properties)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    agent_id, src["id"], tgt["id"], rel_type,
+                    mind_id, src["id"], tgt["id"], rel_type,
                     as_of or datetime.now(timezone.utc).isoformat(),
                     source, data_class or "", "contextual", now,
                     json.dumps(attrs),

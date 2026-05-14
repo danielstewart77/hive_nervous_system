@@ -23,7 +23,7 @@ Edges:
         symmetric:       bool,
     }
 
-`agent_id`, `id`, `created_at`, `updated_at` are infrastructure fields handled
+`mind_id`, `id`, `created_at`, `updated_at` are infrastructure fields handled
 by the write path — they are NOT user-supplied and NOT validated here.
 """
 
@@ -119,6 +119,24 @@ SCHEMA_TYPES: dict[str, dict] = {
         "required": ["level", "school_year"],
         "optional": ["school", "as_of"],
         "enums": {},
+    },
+    "Property": {
+        "kind": "first-class",
+        "required": ["name", "kind", "purpose", "status"],
+        "optional": ["address", "as_of"],
+        "enums": {
+            "kind": ["residential", "commercial", "land", "mixed-use"],
+            "purpose": ["primary", "vacation", "rental", "investment", "second-home"],
+            "status": ["owned", "sold", "under-contract", "pending"],
+        },
+    },
+    "LifeEvent": {
+        "kind": "second-class",
+        "required": ["name", "kind", "summary"],
+        "optional": ["started_at", "ended_at", "as_of"],
+        "enums": {
+            "kind": ["military", "financial", "career", "personal", "move", "health", "award", "travel"],
+        },
     },
     # ---- Mind facets ----
     "Skill": {
@@ -370,6 +388,22 @@ SCHEMA_EDGES: dict[str, dict] = {
         "enums": {},
         "symmetric": False,
     },
+    "OWNS_PROPERTY": {
+        "source_type": "Person",
+        "target_type": "Property",
+        "required_attrs": [],
+        "optional_attrs": ["ownership_share", "acquired", "disposed"],
+        "enums": {},
+        "symmetric": False,
+    },
+    "EXPERIENCED": {
+        "source_type": "Person",
+        "target_type": "LifeEvent",
+        "required_attrs": [],
+        "optional_attrs": [],
+        "enums": {},
+        "symmetric": False,
+    },
     "RUNS": {
         "source_type": "Device",
         "target_type": "OS",
@@ -389,26 +423,91 @@ SCHEMA_EDGES: dict[str, dict] = {
 }
 
 
+def get_type_spec(conn, entity_type: str) -> dict | None:
+    """Look up a node type's spec from the schema_types table.
+
+    Returns the spec dict (``kind`` / ``required`` / ``optional`` / ``enums``)
+    or None if the type is not registered.
+    """
+    import json
+
+    row = conn.execute(
+        "SELECT property_schema FROM schema_types WHERE name = ?", (entity_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row["property_schema"])
+
+
+def get_edge_spec(conn, relation: str) -> dict | None:
+    """Look up an edge type's spec from the schema_edges table.
+
+    Returns a dict shaped like the hardcoded SCHEMA_EDGES entries
+    (``source_type`` / ``target_type`` / ``required_attrs`` / ``optional_attrs``
+    / ``enums`` / ``symmetric``) or None if the edge is not registered.
+    """
+    import json
+
+    row = conn.execute(
+        "SELECT source_type, target_type, attr_schema, symmetric "
+        "FROM schema_edges WHERE name = ?",
+        (relation,),
+    ).fetchone()
+    if row is None:
+        return None
+    attr_schema = json.loads(row["attr_schema"])
+    return {
+        "source_type": row["source_type"],
+        "target_type": row["target_type"],
+        "required_attrs": attr_schema.get("required_attrs", []),
+        "optional_attrs": attr_schema.get("optional_attrs", []),
+        "enums": attr_schema.get("enums", {}),
+        "symmetric": bool(row["symmetric"]),
+    }
+
+
+def _all_type_names(conn) -> list[str]:
+    rows = conn.execute("SELECT name FROM schema_types ORDER BY name").fetchall()
+    return [r["name"] for r in rows]
+
+
+def _all_edge_names(conn) -> list[str]:
+    rows = conn.execute("SELECT name FROM schema_edges ORDER BY name").fetchall()
+    return [r["name"] for r in rows]
+
+
 def validate_node(
-    entity_type: str, properties: dict
+    entity_type: str, properties: dict, conn=None
 ) -> tuple[bool, str | None, dict | None]:
     """Validate a node write against the schema.
+
+    Reads the schema from the schema_types DB table (single runtime source
+    of truth). The hardcoded ``SCHEMA_TYPES`` dict is bootstrap-only — used
+    by ``seed_schema_tables`` on first init, never by the validator.
+
+    ``conn`` is optional; if omitted we fetch the lazy-singleton lucent
+    connection. Callers that already hold a connection can pass it in to
+    avoid the extra lookup.
 
     Returns (ok, code, detail_dict). On failure, code is one of:
         unknown_node_type, missing_required, unknown_field, invalid_enum
     On success returns (True, None, None).
     """
-    spec = SCHEMA_TYPES.get(entity_type)
+    if conn is None:
+        from lucent_api.lucent import _get_connection
+        conn = _get_connection()
+
+    spec = get_type_spec(conn, entity_type)
     if spec is None:
         return False, "unknown_node_type", {
             "detail": f"entity_type {entity_type!r} is not in the schema allow-list",
-            "valid_types": sorted(SCHEMA_TYPES.keys()),
+            "valid_types": _all_type_names(conn),
         }
 
     allowed = set(spec["required"]) | set(spec["optional"])
     # Identity / infrastructure fields tolerated and ignored by validation —
     # the write path owns them.
-    INFRA = {"id", "agent_id", "created_at", "updated_at", "type", "name"}
+    INFRA = {"id", "mind_id", "created_at", "updated_at", "type", "name"}
 
     for field in spec["required"]:
         if field == "name":
@@ -444,19 +543,30 @@ def validate_edge(
     source_type: str,
     target_type: str,
     attrs: dict | None = None,
+    conn=None,
 ) -> tuple[bool, str | None, dict | None]:
     """Validate an edge write against the schema.
+
+    Reads the schema from the schema_edges DB table (single runtime source
+    of truth). The hardcoded ``SCHEMA_EDGES`` dict is bootstrap-only —
+    used by ``seed_schema_tables`` on first init, never by the validator.
+
+    ``conn`` is optional; defaults to the lazy-singleton lucent connection.
 
     Returns (ok, code, detail_dict). On failure, code is one of:
         unknown_edge_type, invalid_edge_direction, missing_required_attr,
         unknown_attr, invalid_enum
     """
     attrs = attrs or {}
-    spec = SCHEMA_EDGES.get(relation)
+    if conn is None:
+        from lucent_api.lucent import _get_connection
+        conn = _get_connection()
+
+    spec = get_edge_spec(conn, relation)
     if spec is None:
         return False, "unknown_edge_type", {
             "detail": f"relation {relation!r} is not in the schema allow-list",
-            "valid_edges": sorted(SCHEMA_EDGES.keys()),
+            "valid_edges": _all_edge_names(conn),
         }
 
     if source_type != spec["source_type"] or target_type != spec["target_type"]:

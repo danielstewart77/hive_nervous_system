@@ -21,7 +21,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS nodes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id    TEXT    NOT NULL,
+            mind_id    TEXT    NOT NULL,
             type        TEXT    NOT NULL,
             name        TEXT    NOT NULL,
             first_name  TEXT,
@@ -33,12 +33,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             as_of       TEXT,
             created_at  REAL,
             updated_at  REAL,
-            UNIQUE(agent_id, name)
+            UNIQUE(mind_id, name)
         );
 
         CREATE TABLE IF NOT EXISTS edges (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id    TEXT    NOT NULL,
+            mind_id    TEXT    NOT NULL,
             source_id   INTEGER NOT NULL REFERENCES nodes(id),
             target_id   INTEGER NOT NULL REFERENCES nodes(id),
             type        TEXT    NOT NULL,
@@ -53,7 +53,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS memories (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id      TEXT    NOT NULL,
+            mind_id      TEXT    NOT NULL,
             content       TEXT    NOT NULL,
             embedding     BLOB,
             tags          TEXT    DEFAULT '',
@@ -84,12 +84,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             created_at       REAL    NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_nodes_agent_id    ON nodes(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_nodes_mind_id    ON nodes(mind_id);
         CREATE INDEX IF NOT EXISTS idx_nodes_type         ON nodes(type);
         CREATE INDEX IF NOT EXISTS idx_nodes_first_name   ON nodes(first_name);
         CREATE INDEX IF NOT EXISTS idx_nodes_last_name    ON nodes(last_name);
-        CREATE INDEX IF NOT EXISTS idx_edges_agent_id     ON edges(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_memories_agent_id  ON memories(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_edges_mind_id     ON edges(mind_id);
+        CREATE INDEX IF NOT EXISTS idx_memories_mind_id  ON memories(mind_id);
         CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at);
         CREATE INDEX IF NOT EXISTS idx_memories_data_class ON memories(data_class);
     """)

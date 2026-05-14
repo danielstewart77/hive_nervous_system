@@ -7,7 +7,7 @@ Verifiable requirements for the memory system. Source of truth:
 
 ## A. Vector schema and tiering
 
-**REQ-001** | The vector store schema includes the following fields per entry: `id`, `content`, `data_class`, `tier`, `agent_id`, `created_at`, `source`, `embedding`. | Schema inspection.
+**REQ-001** | The vector store schema includes the following fields per entry: `id`, `content`, `data_class`, `tier`, `mind_id`, `created_at`, `source`, `embedding`. | Schema inspection.
 
 **REQ-002** | The `tier` field accepts exactly two values: `contextual` and `standing`. | Schema constraint check.
 
@@ -49,7 +49,7 @@ Verifiable requirements for the memory system. Source of truth:
 
 ## C. Mind isolation and access boundaries
 
-**REQ-018** | Vector store reads return entries from any mind regardless of the requesting mind's identity. No `agent_id` filter on reads. | Cross-mind read test.
+**REQ-018** | Vector store reads return entries from any mind regardless of the requesting mind's identity. No `mind_id` filter on reads. | Cross-mind read test.
 
 **REQ-019** | Vector store writes from any mind succeed for any entry, regardless of which mind originally created the entry. | Cross-mind update test.
 
@@ -57,9 +57,9 @@ Verifiable requirements for the memory system. Source of truth:
 
 **REQ-021** | Knowledge graph non-identity nodes are readable and writable by any mind. | Cross-mind read/write test.
 
-**REQ-022** | `agent_id` is recorded as provenance metadata on every write but never used as a query filter. | Code inspection.
+**REQ-022** | `mind_id` is recorded as provenance metadata on every write but never used as a query filter. | Code inspection.
 
-**REQ-022b** | Every write to lucent (`memories`, `nodes`, `edges`) must use the **canonical mind id** (`MIND_AGENT_ID`) as `agent_id`. For minds managed by `core/sessions.py` this is the registry-issued UUID; for unmanaged minds it is a stable literal string documented in the mind's runtime config. The short name (`MIND_ID` — `ada`, `bob`, etc.) **must not** appear in any `agent_id` field. See implementation.md § Identity convention. | Provenance audit; SELECT DISTINCT agent_id sanity check.
+**REQ-022b** | Every write to lucent (`memories`, `nodes`, `edges`) must use the **canonical mind id** (`MIND_ID`) as `mind_id`. For minds managed by `core/sessions.py` this is the registry-issued UUID; for unmanaged minds it is a stable literal string documented in the mind's runtime config. The short name (`MIND_ID` — `ada`, `bob`, etc.) **must not** appear in any `mind_id` field. See implementation.md § Identity convention. | Provenance audit; SELECT DISTINCT mind_id sanity check.
 
 ---
 
