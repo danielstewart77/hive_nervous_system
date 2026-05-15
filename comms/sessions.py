@@ -177,77 +177,6 @@ def _fetch_session_memory(mind_id: str, client_ref: str | None) -> str | None:
     return f"<session-memory>\n{row[0]}\n</session-memory>"
 
 
-def _build_base_prompt(
-    allowed_directories: list[str] | None = None,
-    soul_file: Path | None = None,
-    *,
-    mind_id: str,
-    prompt_files: list[str] | None = None,
-    client_ref: str | None = None,
-) -> str:
-    """Build the base system prompt with current date/time and soul loaded from the graph."""
-    from zoneinfo import ZoneInfo
-    from comms.prompt_profiles import build_prompt
-
-    now = datetime.now(ZoneInfo("America/Chicago"))
-    date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
-
-    resolved = _resolve_mind(mind_id)
-    if resolved is not None:
-        mind_name = resolved.name.capitalize()
-        mind_dir = PROJECT_DIR / "minds" / resolved.name
-        if prompt_files is None:
-            prompt_files = resolved.prompt_files
-    else:
-        mind_name = mind_id.capitalize()
-        mind_dir = PROJECT_DIR / "minds" / mind_id
-        if prompt_files is None:
-            prompt_files = []
-
-    soul = _fetch_soul_sync(mind_id=mind_id)
-    if soul:
-        identity_block = f"{soul}\n\n"
-        soul_instruction = (
-            "Your soul is loaded above from the knowledge graph. When something meaningfully "
-            f"shapes your identity, update it via graph_upsert on the {mind_name} node (soul_values field). "
-            "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
-        )
-    else:
-        # Graph unavailable — degrade gracefully, do not fall back to soul files
-        identity_block = ""
-        soul_instruction = ""
-
-    # Append the bootstrap memory layers (standing rules + decay-weighted recent).
-    # The previous SessionStart-hook carry-forward path is gone; rotation-time
-    # session memory is now read from sessions.db.session_memory via
-    # _fetch_session_memory and prepended below.
-    try:
-        import comms.bootstrap_loader as _bl
-        _extras = "\n\n".join(
-            block
-            for block in (_bl.load_standing_rules(), _bl.load_decay_weighted_recent())
-            if block
-        )
-        if _extras:
-            identity_block = f"{identity_block}{_extras}\n\n"
-    except Exception:
-        log.exception("bootstrap memory injection failed; continuing with soul only")
-
-    # Carry-forward from the most recent rotation for this (mind, chat).
-    session_memory = _fetch_session_memory(mind_id=mind_id, client_ref=client_ref)
-    if session_memory:
-        identity_block = f"{identity_block}{session_memory}\n\n"
-
-    return build_prompt(
-        date_str=date_str,
-        mind_name=mind_name,
-        identity_block=identity_block,
-        soul_instruction=soul_instruction,
-        allowed_directories=allowed_directories,
-        mind_dir=mind_dir,
-        prompt_files=prompt_files,
-    )
-
 # ---------------------------------------------------------------------------
 # Dynamic mind implementation loading
 # ---------------------------------------------------------------------------
@@ -950,11 +879,13 @@ class SessionManager:
         client_ref: str | None = None,
     ) -> Any:
         mind_url = self._mind_url(mind_id)
-        prompt_files: list[str] = []
+        mind_name = ""
         if self.mind_registry:
             info = self.mind_registry.get(mind_id)
             if info:
-                prompt_files = info.prompt_files
+                mind_name = info.name
+        if not mind_name:
+            raise ValueError(f"Mind '{mind_id}' not found in registry (cannot resolve mind_name for dispatch)")
         import aiohttp
         async with aiohttp.ClientSession() as http:
             resp = await http.post(
@@ -966,7 +897,7 @@ class SessionManager:
                     "resume_sid": resume_sid,
                     "surface_prompt": surface_prompt,
                     "allowed_directories": allowed_directories,
-                    "prompt_files": prompt_files,
+                    "mind_name": mind_name,
                     "client_ref": client_ref,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),

@@ -23,7 +23,6 @@ class MindInfo:
     model: str          # e.g. "claude-sonnet-4-6", "gpt-oss:20b-32k"
     harness: str        # e.g. "claude_cli_claude", "codex_cli_codex"
     gateway_url: str    # e.g. "http://host.docker.internal:8421"
-    prompt_files: list[str] = field(default_factory=list)
 
 
 class MindRegistry:
