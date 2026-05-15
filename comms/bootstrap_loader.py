@@ -149,7 +149,21 @@ async def _fetch_session_memory(
         return ""
     if not row or not row["body"]:
         return ""
-    return f"<session-memory>\n{row['body']}\n</session-memory>"
+    raw_body = row["body"]
+    # Phase B10: rotation_check posts a JSON envelope with a pre-rendered
+    # ``carry_forward`` text field (prose summary + recent dialogue +
+    # continuation cue). Prefer that field; fall back to the raw JSON for
+    # legacy rows (pre-B10 rotations) that don't have it.
+    try:
+        import json
+        envelope = json.loads(raw_body)
+        if isinstance(envelope, dict):
+            text = envelope.get("carry_forward")
+            if isinstance(text, str) and text.strip():
+                return f"<session-memory>\n{text.strip()}\n</session-memory>"
+    except (ValueError, TypeError):
+        pass
+    return f"<session-memory>\n{raw_body}\n</session-memory>"
 
 
 async def compose_prompt_blocks(
