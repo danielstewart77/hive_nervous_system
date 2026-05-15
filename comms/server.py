@@ -17,12 +17,13 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import aiohttp
-from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import PROJECT_DIR, config
 import comms.broker as broker
+from comms.auth import require_admin_bearer, require_bearer
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
 from comms.mind_registry import MindRegistry
 from comms.models import ModelRegistry, Provider
@@ -119,7 +120,20 @@ async def lifespan(app: FastAPI):
     await session_mgr.shutdown()
 
 
-app = FastAPI(title="Hive Mind Gateway", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Hive Mind Gateway",
+    version="1.0.0",
+    lifespan=lifespan,
+    dependencies=[Depends(require_bearer)],
+)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Liveness probe. Gated by the regular bearer (set the token on the
+    Docker healthcheck command line). Returns 200 once the app has booted.
+    """
+    return {"status": "ok", "service": "hive-comms"}
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +362,15 @@ async def list_models():
 # ---------------------------------------------------------------------------
 @app.websocket("/sessions/{session_id}/stream")
 async def ws_stream(ws: WebSocket, session_id: str):
+    # FastAPI dependencies don't apply to WebSocket routes — gate manually.
+    expected = os.environ.get("COMMS_BEARER_TOKEN", "")
+    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
+    if expected:
+        auth = ws.headers.get("authorization", "")
+        token = auth[7:] if auth.startswith("Bearer ") else ""
+        if token != expected and (not admin or token != admin):
+            await ws.close(code=4401)
+            return
     await ws.accept()
     try:
         while True:
@@ -497,9 +520,9 @@ async def broker_get_minds():
     return await broker.get_registered_minds(db)
 
 
-@app.post("/broker/minds")
+@app.post("/broker/minds", dependencies=[Depends(require_admin_bearer)])
 async def broker_register_mind(body: RegisterMindRequest):
-    """Register (or update) a mind in the broker database."""
+    """Register (or update) a mind in the broker database. Admin-only."""
     db = app.state.broker_db
     await broker.register_mind(
         db, name=body.name, gateway_url=body.gateway_url,
@@ -508,9 +531,9 @@ async def broker_register_mind(body: RegisterMindRequest):
     return await broker.get_mind(db, body.name)
 
 
-@app.put("/broker/minds/{name}")
+@app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
 async def broker_update_mind(name: str, body: UpdateMindRequest):
-    """Partially update a mind's fields."""
+    """Partially update a mind's fields. Admin-only."""
     db = app.state.broker_db
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     result = await broker.update_mind(db, name, **fields)
@@ -519,9 +542,9 @@ async def broker_update_mind(name: str, body: UpdateMindRequest):
     return result
 
 
-@app.delete("/broker/minds/{name}")
+@app.delete("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
 async def broker_delete_mind(name: str):
-    """Deregister a mind from the broker database."""
+    """Deregister a mind from the broker database. Admin-only."""
     db = app.state.broker_db
     deleted = await broker.delete_mind(db, name)
     if not deleted:
@@ -638,37 +661,50 @@ async def secrets_get(key: str, request: Request):
     return {"key": key, "value": value}
 
 
-@app.post("/secrets/scopes")
+@app.post("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
 async def secrets_grant_scopes(body: SecretScopeRequest):
-    """Grant a mind access to one or more secret keys.
+    """Grant a mind access to one or more secret keys. Admin-only."""
+    db = app.state.broker_db
+    for key in body.secret_keys:
+        await grant_secret_scope(db, body.mind_name, key)
+    return {"ok": True, "mind_name": body.mind_name, "granted": body.secret_keys}
 
-    TODO(A2): wire bearer-auth admin scope. Until then, fail closed.
-    """
-    return JSONResponse({"error": "admin auth not wired (Phase A2)"}, status_code=503)
 
-
-@app.delete("/secrets/scopes")
+@app.delete("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
 async def secrets_revoke_scopes(body: SecretScopeRequest):
-    """Revoke a mind's access to one or more secret keys.
-
-    TODO(A2): wire bearer-auth admin scope. Until then, fail closed.
-    """
-    return JSONResponse({"error": "admin auth not wired (Phase A2)"}, status_code=503)
+    """Revoke a mind's access to one or more secret keys. Admin-only."""
+    db = app.state.broker_db
+    for key in body.secret_keys:
+        await revoke_secret_scope(db, body.mind_name, key)
+    return {"ok": True, "mind_name": body.mind_name, "revoked": body.secret_keys}
 
 
 @app.get("/secrets/scopes/{mind_name}")
 async def secrets_list_scopes(mind_name: str, request: Request):
     """List all secret keys a mind is allowed to access.
 
-    Auth: network identity — a mind can list its own scopes.
-    TODO(A2): add bearer-auth admin path for cross-mind listing.
+    Auth paths:
+    - Admin bearer (cross-mind listing — caller doesn't have to match mind_name)
+    - Network identity (a mind listing its own scopes — caller IP resolves to mind_name)
+
+    The router-level `require_bearer` is already satisfied at this point;
+    here we just decide whether the caller can read THIS specific mind's scopes.
     """
-    caller_ip = request.client.host if request.client else None
-    if not caller_ip:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    caller_name = await resolve_container_name(caller_ip)
-    if caller_name != mind_name:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    admin_token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
+    auth_header = request.headers.get("authorization", "")
+    is_admin = (
+        admin_token
+        and auth_header.startswith("Bearer ")
+        and auth_header[7:] == admin_token
+    )
+
+    if not is_admin:
+        caller_ip = request.client.host if request.client else None
+        if not caller_ip:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        caller_name = await resolve_container_name(caller_ip)
+        if caller_name != mind_name:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     db = app.state.broker_db
     keys = await get_secret_scopes(db, mind_name)
