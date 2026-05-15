@@ -147,8 +147,6 @@ class SessionManager:
         self._rc_procs: dict[str, asyncio.subprocess.Process] = {}  # RC subprocesses
         self._locks: dict[str, asyncio.Lock] = {}
         self._observer_queues: dict[str, set[asyncio.Queue]] = {}
-        self._reaper_task: asyncio.Task | None = None
-        self._guard_task: asyncio.Task | None = None
         self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
 
     # ------------------------------------------------------------------
@@ -192,16 +190,10 @@ class SessionManager:
             "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
         )
         await self._db.commit()
-        self._reaper_task = asyncio.create_task(self._idle_reaper())
-        self._guard_task = asyncio.create_task(self._autopilot_guard())
         log.info("Session manager started (db=%s)", db_path)
 
     async def shutdown(self):
         """Kill all subprocesses and close DB."""
-        if self._reaper_task:
-            self._reaper_task.cancel()
-        if self._guard_task:
-            self._guard_task.cancel()
         # Kill RC subprocesses that may not have a corresponding main process
         for sid in list(self._rc_procs):
             await self.kill_rc_process(sid)
@@ -1070,66 +1062,6 @@ class SessionManager:
             (group_session_id,),
         )
         return [dict(r) for r in await rows.fetchall()]
-
-    # ------------------------------------------------------------------
-    # Background tasks
-    # ------------------------------------------------------------------
-    async def _idle_reaper(self):
-        """Kill sessions idle beyond timeout. Runs every 60s.
-
-        Reaped sessions get status='idle' with epilogue_status=NULL,
-        so Trigger A (next session creation) or Trigger B (scheduler sweep)
-        will pick them up for epilogue processing.
-        """
-        while True:
-            try:
-                await asyncio.sleep(60)
-                cutoff = time.time() - (config.idle_timeout_minutes * 60)
-                rows = await self._db.execute(
-                    "SELECT id FROM sessions WHERE status = 'running' AND last_active < ?",
-                    (cutoff,),
-                )
-                for row in await rows.fetchall():
-                    sid = row["id"]
-                    await self._kill_process(sid)
-                    await self._publish_session_event(
-                        sid, {"type": "session_closed", "session_id": sid}
-                    )
-                    self._observer_queues.pop(sid, None)
-                    await self._db.execute(
-                        "UPDATE sessions SET status = 'idle' WHERE id = ?", (sid,)
-                    )
-                    log.info("Reaped idle session %s", sid)
-                await self._db.commit()
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                log.exception("Error in idle reaper")
-
-    async def _autopilot_guard(self):
-        """Kill runaway autopilot sessions. Runs every 30s."""
-        while True:
-            try:
-                await asyncio.sleep(30)
-                guards = config.autopilot_guards
-                cutoff = time.time() - (guards.max_minutes_without_input * 60)
-                rows = await self._db.execute(
-                    "SELECT id FROM sessions WHERE status = 'running' AND autopilot = 1 AND last_active < ?",
-                    (cutoff,),
-                )
-                for row in await rows.fetchall():
-                    sid = row["id"]
-                    await self._kill_process(sid)
-                    await self._db.execute(
-                        "UPDATE sessions SET status = 'killed_guard' WHERE id = ?",
-                        (sid,),
-                    )
-                    log.warning("Autopilot guard killed session %s", sid)
-                await self._db.commit()
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                log.exception("Error in autopilot guard")
 
     # ------------------------------------------------------------------
     # Helpers
