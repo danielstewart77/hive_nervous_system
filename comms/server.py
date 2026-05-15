@@ -25,7 +25,6 @@ from comms.config import PROJECT_DIR, config
 import comms.broker as broker
 from comms.auth import require_admin_bearer, require_bearer
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
-from comms.mind_registry import MindRegistry
 from comms.models import ModelRegistry, Provider
 from comms.network_identity import resolve_container_name
 from comms.secrets import get_credential
@@ -79,19 +78,13 @@ session_mgr = SessionManager(model_registry)
 async def lifespan(app: FastAPI):
     await session_mgr.start()
 
-    # Broker DB init + startup recovery
+    # Broker DB init + startup recovery. broker.minds IS the mind
+    # registry — there is no in-memory cache. Every lookup queries the
+    # DB directly. Single source of truth.
     _broker_db_path = os.environ.get("BROKER_DB_PATH", str(PROJECT_DIR / "data" / "broker.db"))
     Path(_broker_db_path).parent.mkdir(parents=True, exist_ok=True)
     app.state.broker_db = await broker.init_db(_broker_db_path)
-
-    # Mind registry: hydrate from broker.minds. Filesystem scan is gone —
-    # minds are registered exclusively via POST /broker/minds. See
-    # backlog/mind-registration-service.md for the Layer 2 provisioning UI.
-    mind_registry = MindRegistry()
-    rows = await broker.get_registered_minds(app.state.broker_db)
-    mind_registry.load_from_rows(rows)
-    app.state.mind_registry = mind_registry
-    session_mgr.mind_registry = mind_registry
+    session_mgr.broker_db = app.state.broker_db
 
     pending = await broker.recover_stranded_messages(app.state.broker_db)
     for msg in pending:
@@ -497,12 +490,9 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
 # ---------------------------------------------------------------------------
 # Broker endpoints (inter-mind messaging)
 # ---------------------------------------------------------------------------
-def _mind_exists(mind_id: str) -> bool:
-    """Check if a mind is registered in the broker registry."""
-    return bool(
-        hasattr(app.state, "mind_registry")
-        and app.state.mind_registry.get(mind_id)
-    )
+async def _mind_exists(mind_id: str) -> bool:
+    """Check if a mind is registered in the broker."""
+    return await broker.get_mind_by_id(app.state.broker_db, mind_id) is not None
 
 
 @app.get("/broker/minds")
@@ -524,15 +514,7 @@ async def broker_register_mind(body: RegisterMindRequest):
         model=body.model,
         harness=body.harness,
     )
-    row = await broker.get_mind_by_id(db, body.mind_id)
-    # Keep in-memory cache in sync with broker DB.
-    from comms.mind_registry import MindInfo  # noqa: PLC0415
-    app.state.mind_registry.upsert(MindInfo(
-        mind_id=row["id"], name=row["name"],
-        model=row["model"], harness=row["harness"],
-        gateway_url=row["gateway_url"],
-    ))
-    return row
+    return await broker.get_mind_by_id(db, body.mind_id)
 
 
 @app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
@@ -543,12 +525,6 @@ async def broker_update_mind(name: str, body: UpdateMindRequest):
     result = await broker.update_mind(db, name, **fields)
     if result is None:
         return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
-    from comms.mind_registry import MindInfo  # noqa: PLC0415
-    app.state.mind_registry.upsert(MindInfo(
-        mind_id=result["id"], name=result["name"],
-        model=result["model"], harness=result["harness"],
-        gateway_url=result["gateway_url"],
-    ))
     return result
 
 
@@ -556,21 +532,18 @@ async def broker_update_mind(name: str, body: UpdateMindRequest):
 async def broker_delete_mind(name: str):
     """Deregister a mind from the broker database. Admin-only."""
     db = app.state.broker_db
-    mind = await broker.get_mind(db, name)
     deleted = await broker.delete_mind(db, name)
     if not deleted:
         return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
-    if mind:
-        app.state.mind_registry.remove(mind["id"])
     return {"ok": True, "name": name}
 
 
 @app.post("/broker/messages", response_model=BrokerMessageResponse)
 async def broker_post_message(body: BrokerMessageRequest):
     """Receive an inter-mind message, write to DB, kick off background wakeup."""
-    if not _mind_exists(body.to_mind):
+    if not await _mind_exists(body.to_mind):
         return JSONResponse(
-            {"error": f"Mind '{body.to_mind}' not found. No minds/{body.to_mind}/implementation.py exists."},
+            {"error": f"Mind '{body.to_mind}' not found in broker.minds. Register via POST /broker/minds."},
             status_code=404,
         )
 

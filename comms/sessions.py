@@ -48,27 +48,6 @@ async def _drain_stderr(proc: Any, session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mind resolver — UUID → MindInfo via filesystem scan (cached)
-# ---------------------------------------------------------------------------
-
-
-
-def _resolve_mind(mind_id: str) -> Any:
-    """Resolve a mind_id (UUID) to its MindInfo via the in-memory registry
-    populated from broker.minds. Returns None if not registered.
-    """
-    # Late import to avoid circular dep with server.app.state
-    try:
-        from comms.server import app  # noqa: PLC0415
-        registry = getattr(app.state, "mind_registry", None)
-        if registry is None:
-            return None
-        return registry.get(mind_id)
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Memory helpers — run in executor (synchronous neo4j/requests calls)
 # ---------------------------------------------------------------------------
 
@@ -108,99 +87,6 @@ if os.environ.get("HOST_MCP_DIR"):
     _PROJECT_DIR_NAMES[os.environ["HOST_MCP_DIR"]] = "Hivemind MCP"
 if os.environ.get("HOST_SPARK_DIR"):
     _PROJECT_DIR_NAMES[os.environ["HOST_SPARK_DIR"]] = "Spark to Bloom"
-
-
-def _fetch_soul_sync(mind_id: str) -> str | None:
-    """Load a mind's soul/identity from the knowledge graph. Returns formatted block or None."""
-    import sys as _sys
-    tools_path = str(PROJECT_DIR / "tools" / "stateful")
-    if tools_path not in _sys.path:
-        _sys.path.insert(0, tools_path)
-    try:
-        from lucent_graph import graph_query  # noqa: PLC0415
-    except ImportError:
-        log.error("_fetch_soul_sync: could not import lucent_graph from %s", tools_path)
-        return None
-    try:
-        info = _resolve_mind(mind_id)
-        mind_name = info.name.capitalize() if info else mind_id.capitalize()
-        result = json.loads(graph_query(entity_name=mind_name, mind_id=mind_id, depth=1))
-        if not result.get("found"):
-            log.debug("_fetch_soul_sync: no graph node found for mind_id=%r", mind_id)
-            return None
-        soul_values = result.get("matches", [{}])[0].get("properties", {}).get("soul_values", [])
-        if not soul_values:
-            log.warning("_fetch_soul_sync: node found for %r but soul_values is empty", mind_id)
-            return None
-        return "\n".join(["<soul>"] + list(soul_values) + ["</soul>"])
-    except Exception:
-        log.exception("_fetch_soul_sync: unexpected error loading soul for mind_id=%r", mind_id)
-        return None
-
-
-def _fetch_session_memory(mind_id: str, client_ref: str | None) -> str | None:
-    """Load the latest session-memory row for this (mind, chat) and return it
-    as a ``<session-memory>...</session-memory>`` block. Returns ``None`` when
-    no row exists, ``client_ref`` is missing, or the DB can't be read.
-
-    Written by ``~/.claude/hooks/rotation_check.py`` on rotation; consumed
-    here at every base-prompt build so the new session picks up where the
-    old one left off. The injection rides the same ``--append-system-prompt``
-    path as ``_fetch_soul_sync``.
-    """
-    if not client_ref:
-        return None
-    import sqlite3 as _sqlite3  # noqa: PLC0415
-
-    db_path = os.environ.get("SESSIONS_DB_PATH", str(PROJECT_DIR / "sessions.db"))
-    try:
-        con = _sqlite3.connect(db_path)
-        try:
-            row = con.execute(
-                """
-                SELECT body
-                  FROM session_memory
-                 WHERE mind_id = ? AND client_ref = ?
-                 ORDER BY created_at DESC, id DESC
-                 LIMIT 1
-                """,
-                (mind_id, client_ref),
-            ).fetchone()
-        finally:
-            con.close()
-    except Exception:
-        log.exception("_fetch_session_memory: read failed for mind_id=%r client_ref=%r", mind_id, client_ref)
-        return None
-
-    if not row or not row[0]:
-        return None
-    return f"<session-memory>\n{row[0]}\n</session-memory>"
-
-
-# ---------------------------------------------------------------------------
-# Dynamic mind implementation loading
-# ---------------------------------------------------------------------------
-_implementation_cache: dict[str, types.ModuleType] = {}
-
-
-def _load_implementation(mind_id: str) -> types.ModuleType:
-    """Load the implementation module for a given mind.
-
-    Falls back to Ada's implementation if the requested mind has no module.
-    """
-    if mind_id in _implementation_cache:
-        return _implementation_cache[mind_id]
-    resolved = _resolve_mind(mind_id)
-    module_path = f"minds.{resolved.name}.implementation" if resolved else f"minds.{mind_id}.implementation"
-    try:
-        mod = importlib.import_module(module_path)
-        _implementation_cache[mind_id] = mod
-        return mod
-    except (ImportError, ModuleNotFoundError):
-        log.warning("No implementation for mind %s, falling back to ada", mind_id)
-        if "ada" not in _implementation_cache:
-            _implementation_cache["ada"] = importlib.import_module("minds.ada.implementation")
-        return _implementation_cache["ada"]
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +149,7 @@ class SessionManager:
         self._observer_queues: dict[str, set[asyncio.Queue]] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
-        self.mind_registry = None  # Set by server.py after scan
+        self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -856,13 +742,15 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Subprocess management
     # ------------------------------------------------------------------
-    def _mind_url(self, mind_id: str) -> str:
-        """Return the mind's gateway_url from the registry."""
-        if self.mind_registry:
-            info = self.mind_registry.get(mind_id)
-            if info:
-                return info.gateway_url
-        raise ValueError(f"Mind '{mind_id}' not found in registry")
+    async def _get_mind_row(self, mind_id: str) -> dict:
+        """Resolve a mind_id to its broker.minds row, or raise."""
+        from comms import broker  # noqa: PLC0415
+        if self.broker_db is None:
+            raise ValueError("SessionManager.broker_db not wired; call lifespan startup first")
+        row = await broker.get_mind_by_id(self.broker_db, mind_id)
+        if not row:
+            raise ValueError(f"Mind '{mind_id}' not found in broker.minds")
+        return row
 
     async def _spawn(
         self,
@@ -878,14 +766,9 @@ class SessionManager:
         is_group_session: bool = False,
         client_ref: str | None = None,
     ) -> Any:
-        mind_url = self._mind_url(mind_id)
-        mind_name = ""
-        if self.mind_registry:
-            info = self.mind_registry.get(mind_id)
-            if info:
-                mind_name = info.name
-        if not mind_name:
-            raise ValueError(f"Mind '{mind_id}' not found in registry (cannot resolve mind_name for dispatch)")
+        row = await self._get_mind_row(mind_id)
+        mind_url = row["gateway_url"]
+        mind_name = row["name"]
         import aiohttp
         async with aiohttp.ClientSession() as http:
             resp = await http.post(

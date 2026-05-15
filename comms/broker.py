@@ -347,10 +347,9 @@ async def wakeup_and_collect(
 
         # 2. Create callee session — use the mind's configured model
         mind_model = None
-        if hasattr(session_mgr, "mind_registry") and session_mgr.mind_registry:
-            mind_info = session_mgr.mind_registry.get(to_mind)
-            if mind_info:
-                mind_model = mind_info.model
+        row = await get_mind_by_id(db, to_mind)
+        if row:
+            mind_model = row.get("model")
         session = await session_mgr.create_session(
             owner_type="broker",
             owner_ref=f"broker-{conversation_id}",
