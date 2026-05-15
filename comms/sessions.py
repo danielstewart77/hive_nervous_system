@@ -393,12 +393,14 @@ class SessionManager:
         await self._db.commit()
 
         if session["status"] == "idle" and session_id not in self._procs:
+            routing = await self._routing_for(session)
             await self._spawn(
                 session_id,
                 session["model"],
                 autopilot=bool(session["autopilot"]),
                 resume_sid=session["claude_sid"],
                 mind_id=session["mind_id"],
+                **routing,
             )
             await self._db.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?", (session_id,)
@@ -440,12 +442,14 @@ class SessionManager:
 
             if needs_respawn:
                 log.info("send_message: respawn session=%s mind=%s model=%s", session_id, mind_id, session["model"])
+                routing = await self._routing_for(session)
                 await self._spawn(
                     session_id,
                     session["model"],
                     autopilot=bool(session["autopilot"]),
                     resume_sid=session["claude_sid"],
                     mind_id=mind_id,
+                    **routing,
                 )
                 await self._db.execute(
                     "UPDATE sessions SET status = 'running' WHERE id = ?",
@@ -533,11 +537,13 @@ class SessionManager:
                                 if not retried:
                                     retried = True
                                     log.info("Session %s not found on %s, respawning", session_id, mind_url)
+                                    routing = await self._routing_for(session)
                                     await self._spawn(
                                         session_id, session["model"],
                                         autopilot=bool(session["autopilot"]),
                                         resume_sid=session.get("claude_sid"),
                                         mind_id=mind_id,
+                                        **routing,
                                     )
                                     continue
                                 raise ValueError(f"Session {session_id} not found after respawn")
@@ -572,10 +578,12 @@ class SessionManager:
                                         (session_id,),
                                     )
                                     await self._db.commit()
+                                    routing = await self._routing_for(session)
                                     await self._spawn(
                                         session_id, session["model"],
                                         autopilot=bool(session["autopilot"]),
                                         mind_id=mind_id,
+                                        **routing,
                                     )
                                     break
 
@@ -630,12 +638,14 @@ class SessionManager:
         )
         await self._db.commit()
 
+        routing = await self._routing_for(session)
         await self._spawn(
             session_id,
             model,
             autopilot=bool(session["autopilot"]),
             resume_sid=session["claude_sid"],
             mind_id=session["mind_id"],
+            **routing,
         )
 
         result = await self._session_dict(session_id)
@@ -662,12 +672,14 @@ class SessionManager:
         )
         await self._db.commit()
 
+        routing = await self._routing_for(session)
         await self._spawn(
             session_id,
             session["model"],
             autopilot=bool(new_autopilot),
             resume_sid=session["claude_sid"],
             mind_id=session["mind_id"],
+            **routing,
         )
         return await self._session_dict(session_id)
 
@@ -1082,6 +1094,32 @@ class SessionManager:
         if len(results) == 1:
             return dict(results[0])
         return None
+
+    async def _routing_for(self, session: dict) -> dict:
+        """Resolve (owner_type, owner_ref, client_ref) for an existing session
+        so respawn paths inject the same env into the subprocess that the
+        original create_session call did. The rotation Stop hook reads
+        CLIENT_REF/OWNER_TYPE/OWNER_REF from env; if respawn loses any of
+        them, the hook bails on every Stop with "missing client_ref" and
+        rotation silently breaks.
+
+        owner_type / owner_ref live on the sessions row. client_ref lives
+        on active_sessions, keyed by session_id.
+        """
+        owner_type = session.get("owner_type") or ""
+        owner_ref = session.get("owner_ref") or ""
+        client_ref = ""
+        try:
+            cursor = await self._db.execute(
+                "SELECT client_ref FROM active_sessions WHERE session_id = ? LIMIT 1",
+                (session["id"],),
+            )
+            row = await cursor.fetchone()
+            if row and row["client_ref"]:
+                client_ref = row["client_ref"]
+        except Exception:
+            log.exception("client_ref lookup failed for session=%s", session.get("id"))
+        return {"owner_type": owner_type, "owner_ref": owner_ref, "client_ref": client_ref}
 
     async def get_transcript_path(self, session_id: str) -> Path | None:
         """Get the path to a session's Claude transcript JSONL file.
