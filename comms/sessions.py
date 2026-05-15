@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
-from config import PROJECT_DIR, config
+from comms.config import PROJECT_DIR, config
 from comms.models import ModelRegistry
 
 _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
@@ -51,34 +51,21 @@ async def _drain_stderr(proc: Any, session_id: str) -> None:
 # Mind resolver — UUID → MindInfo via filesystem scan (cached)
 # ---------------------------------------------------------------------------
 
-import functools as _functools
 
 
-@_functools.lru_cache(maxsize=8)
 def _resolve_mind(mind_id: str) -> Any:
-    """Resolve a mind_id (UUID) to its MindInfo by scanning minds/*/MIND.md.
-
-    Returns None when no match is found, in which case callers fall back to
-    treating ``mind_id`` as the legacy name (preserves the "ada" fallback).
+    """Resolve a mind_id (UUID) to its MindInfo via the in-memory registry
+    populated from broker.minds. Returns None if not registered.
     """
-    from comms.mind_registry import parse_mind_file  # noqa: PLC0415
-
-    minds_dir = PROJECT_DIR / "minds"
-    if not minds_dir.exists():
+    # Late import to avoid circular dep with server.app.state
+    try:
+        from comms.server import app  # noqa: PLC0415
+        registry = getattr(app.state, "mind_registry", None)
+        if registry is None:
+            return None
+        return registry.get(mind_id)
+    except Exception:
         return None
-    for subdir in sorted(minds_dir.iterdir()):
-        if not subdir.is_dir():
-            continue
-        mind_file = subdir / "MIND.md"
-        if not mind_file.exists():
-            continue
-        try:
-            info = parse_mind_file(mind_file)
-        except Exception:
-            continue
-        if info.mind_id == mind_id:
-            return info
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +187,6 @@ def _build_base_prompt(
 ) -> str:
     """Build the base system prompt with current date/time and soul loaded from the graph."""
     from zoneinfo import ZoneInfo
-    from comms.mind_registry import parse_mind_file
     from comms.prompt_profiles import build_prompt
 
     now = datetime.now(ZoneInfo("America/Chicago"))
@@ -216,8 +202,7 @@ def _build_base_prompt(
         mind_name = mind_id.capitalize()
         mind_dir = PROJECT_DIR / "minds" / mind_id
         if prompt_files is None:
-            info = parse_mind_file(mind_dir / "MIND.md")
-            prompt_files = info.prompt_files
+            prompt_files = []
 
     soul = _fetch_soul_sync(mind_id=mind_id)
     if soul:

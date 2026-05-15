@@ -35,6 +35,10 @@ services:
     restart: unless-stopped
     networks:
       - hivemind
+    # Resolve host.docker.internal to the host gateway on Linux so comms
+    # can dispatch HTTP to bare-metal minds (e.g. Skippy at port 8421).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # Host bind for Skippy (bare-metal) to reach comms. Container-internal
       # listeners come in via the hivemind network on 8424.
