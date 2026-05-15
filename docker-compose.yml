@@ -27,6 +27,32 @@ services:
       # pick up changes.
       - ./lucent_api:/app/lucent_api
 
+  comms:
+    build:
+      context: .
+      dockerfile: comms/Dockerfile
+    container_name: hive-comms
+    restart: unless-stopped
+    networks:
+      - hivemind
+    ports:
+      # Host bind for Skippy (bare-metal) to reach comms. Container-internal
+      # listeners come in via the hivemind network on 8424.
+      - "127.0.0.1:8426:8424"
+    environment:
+      COMMS_PORT: "8424"
+      COMMS_PROJECT_DIR: "/app"
+      BROKER_DB_PATH: "/data/broker.db"
+      SESSIONS_DB_PATH: "/data/sessions.db"
+      # COMMS_BEARER_TOKEN — wired in A2 via .env
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+      # Bind-mount comms/ so code edits don't require a rebuild —
+      # restart the container to pick up changes.
+      - ./comms:/app/comms
+
 networks:
   hivemind:
     external: true
