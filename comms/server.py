@@ -453,7 +453,6 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         running = sum(1 for s in sessions if s["status"] == "running")
         return {
             "server_port": config.server_port,
-            "default_model": config.default_model,
             "total_sessions": len(sessions),
             "running_sessions": running,
         }

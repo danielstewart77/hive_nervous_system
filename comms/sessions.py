@@ -218,7 +218,22 @@ class SessionManager:
         mind_id: str,
     ) -> dict:
         """Create a new session, spawn process, return session info."""
-        model = model or config.default_model
+        # The mind's preferred model lives in broker.minds (set at registration
+        # from each mind's own config). The caller can override per-session,
+        # but absent that, the mind picks. No comms-wide silent fallback —
+        # if the mind isn't registered, broker.get_mind_by_id 404s downstream.
+        from comms import bootstrap_loader  # noqa: PLC0415
+        from comms import broker  # noqa: PLC0415
+        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
+        mind_name = (mind_row or {}).get("name") or mind_id
+        if not model:
+            model = (mind_row or {}).get("model")
+            if not model:
+                raise ValueError(
+                    f"no model: caller did not specify and mind_id={mind_id} "
+                    "is not in broker.minds (or has no model column set)"
+                )
+
         session_id = str(uuid.uuid4())
         now = time.time()
 
@@ -237,13 +252,6 @@ class SessionManager:
         # Graph is authoritative; MIND.md soul_seed is one-time bootstrap only
         soul_file = None
 
-        # Compose the system-prompt content for this mind. NS owns prompt
-        # composition; the mind passes the resulting string straight to
-        # ``claude --append-system-prompt``. See comms/bootstrap_loader.py.
-        from comms import bootstrap_loader  # noqa: PLC0415
-        from comms import broker  # noqa: PLC0415
-        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
-        mind_name = (mind_row or {}).get("name") or mind_id
         system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
             mind_id=mind_id,
             mind_name=mind_name,
