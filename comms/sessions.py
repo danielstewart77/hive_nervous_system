@@ -159,6 +159,11 @@ class SessionManager:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(db_path))
         self._db.row_factory = aiosqlite.Row
+        # FK enforcement is per-connection in SQLite and OFF by default.
+        # Without this, orphan active_sessions rows survive their parent
+        # sessions row's deletion — exactly the dangling-pointer class of
+        # bug that caused "two active rows for the same chat" mysteries.
+        await self._db.execute("PRAGMA foreign_keys = ON")
         await self._db.executescript(_SCHEMA)
         await self._db.commit()
         # Migration: add epilogue_status column for existing databases
