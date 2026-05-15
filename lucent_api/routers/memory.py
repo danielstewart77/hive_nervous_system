@@ -73,18 +73,23 @@ def memory_list(
 
 @router.get("/recent-decayed")
 def memory_recent_decayed(
+    mind_id: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
 ) -> Any:
-    """Top-N contextual entries scored by recency decay (REQ-024)."""
+    """Top-N contextual entries scored by recency decay (REQ-024).
+
+    Optional ``mind_id`` filter — opt-in per-mind read, same shape as
+    ``/memory/list`` and ``/memory/retrieve``.
+    """
     from lucent_api.lucent_memory import query_decayed
 
-    return _decode(query_decayed(limit=limit))
+    return _decode(query_decayed(limit=limit, mind_id=mind_id))
 
 
 @router.get("/retrieve")
 def memory_retrieve(
     query: str = Query(...),
-    mind_id: str = Query("ada"),
+    mind_id: str | None = Query(None),
     k: int = Query(10, ge=1, le=50),
     tag_filter: str | None = Query(None),
     data_class: str | None = Query(None),
@@ -93,6 +98,7 @@ def memory_retrieve(
     """Semantic search — return top-k memories most relevant to the query.
 
     Optional filters:
+      mind_id    — provenance filter, opt-in (omit for cross-mind).
       data_class — keep only entries matching the given class.
       min_score  — drop entries below this cosine similarity (0.0–1.0).
     """

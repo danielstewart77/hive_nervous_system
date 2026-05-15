@@ -465,7 +465,7 @@ def memory_update(
 def memory_retrieve(
     query: str,
     k: int = 10,
-    mind_id: str = "ada",
+    mind_id: str | None = None,
     tag_filter: Optional[str] = None,
     data_class: Optional[str] = None,
     min_score: Optional[float] = None,
@@ -475,8 +475,12 @@ def memory_retrieve(
     Args:
         query: Natural language query to search for related memories.
         k: Number of results to return (default 10, max 50).
-        mind_id: Accepted for backwards compatibility but ignored — mind_id
-            is provenance only and does not filter reads (REQ-006).
+        mind_id: Optional filter. When set, returns only entries whose
+            provenance ``mind_id`` matches exactly. When omitted, returns
+            entries from every mind (cross-mind read, REQ-006's original
+            default). The contextual-retrieval hook uses this to fetch a
+            mind's own behaviour-rule feedback plus the "shared" sentinel
+            via two calls and union — same pattern as ``memory_list``.
         tag_filter: Optional tag to filter results.
         data_class: Optional data class filter — keep only entries with the
             given data_class.
@@ -486,34 +490,32 @@ def memory_retrieve(
     Returns:
         JSON array of memories sorted by relevance (highest first).
     """
-    del mind_id  # REQ-006: mind_id is not a query filter on reads.
     k = min(k, 50)
+
+    where_parts: list[str] = []
+    params: list = []
+    if tag_filter:
+        where_parts.append("tags LIKE ?")
+        params.append(f"%{tag_filter}%")
+    if mind_id:
+        where_parts.append("mind_id = ?")
+        params.append(mind_id)
+    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
     try:
         query_embedding = np.array(_embed(query), dtype=np.float32)
 
         conn = _get_conn()
-
-        # Build query with optional tag filter
-        if tag_filter:
-            rows = conn.execute(
-                """
-                SELECT id, content, embedding, tags, source, mind_id,
-                       created_at, data_class, tier, as_of, expires_at,
-                       superseded, codebase_ref
-                FROM memories
-                WHERE tags LIKE ?
-                """,
-                (f"%{tag_filter}%",),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT id, content, embedding, tags, source, mind_id,
-                       created_at, data_class, tier, as_of, expires_at,
-                       superseded, codebase_ref
-                FROM memories
-                """
-            ).fetchall()
+        rows = conn.execute(
+            f"""
+            SELECT id, content, embedding, tags, source, mind_id,
+                   created_at, data_class, tier, as_of, expires_at,
+                   superseded, codebase_ref
+            FROM memories
+            {where_clause}
+            """,
+            params,
+        ).fetchall()
 
         if not rows:
             return json.dumps({"memories": [], "count": 0})
@@ -564,7 +566,7 @@ def memory_retrieve(
         return json.dumps({"error": str(e)})
 
 
-def query_decayed(limit: int = 20) -> str:
+def query_decayed(limit: int = 20, mind_id: str | None = None) -> str:
     """Return top-N contextual entries scored by recency decay.
 
     Score: ``exp(-(now - created_at) / (DECAY_HALF_LIFE_DAYS * 86400))``.
@@ -573,6 +575,10 @@ def query_decayed(limit: int = 20) -> str:
 
     Args:
         limit: max rows to return (default 20).
+        mind_id: optional provenance filter — opt-in per-mind read (same
+            shape as memory_list / memory_retrieve). When set, returns
+            only rows whose mind_id matches exactly. When omitted, returns
+            rows from every mind (cross-mind default).
 
     Returns:
         JSON-encoded list of dicts: id, content, data_class, score,
@@ -580,14 +586,22 @@ def query_decayed(limit: int = 20) -> str:
     """
     import math
 
+    where_parts = ["tier = 'contextual'"]
+    params: list = []
+    if mind_id:
+        where_parts.append("mind_id = ?")
+        params.append(mind_id)
+    where_clause = "WHERE " + " AND ".join(where_parts)
+
     try:
         conn = _get_conn()
         rows = conn.execute(
-            """
+            f"""
             SELECT id, content, data_class, mind_id, created_at
             FROM memories
-            WHERE tier = 'contextual'
-            """
+            {where_clause}
+            """,
+            params,
         ).fetchall()
 
         if not rows:

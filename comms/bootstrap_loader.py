@@ -1,67 +1,40 @@
-"""Session bootstrap memory layers.
+"""Session prompt-block composition — owned by NS.
 
-Provides two layers that `core/sessions.py::_build_base_prompt` composes
-into the system prompt of every new session, after the soul block:
+When ``comms/sessions.py::SessionManager.create_session`` builds a new
+session, it calls ``compose_prompt_blocks`` here to assemble the
+system-prompt content from per-mind data:
 
-1. Standing rules (vector store, tier=standing)
-2. Decay-weighted recent memory (vector store, tier=contextual, top-20)
+1. ``<soul>`` — from lucent KG, per-mind UUID
+2. ``<standing-rules>`` — from lucent vector store, tier=standing,
+   union of this mind's UUID and ``mind_id="shared"``
+3. ``<recent-memory>`` — from lucent vector store, decay-weighted
+   contextual entries, per-mind
+4. ``<session-memory>`` — from comms's own ``session_memory`` table,
+   the latest rotation carry-forward for this ``(mind_id, client_ref)``
 
-Identity (the soul) is loaded by `core/sessions.py::_fetch_soul_sync`.
-Rotation carry-forward is loaded by `core/sessions.py::_fetch_session_memory`.
+The composed string is shipped to the mind's ``mind_server`` via the
+``system_prompt_blocks`` field of the ``/sessions`` POST. The mind
+passes it straight through to ``claude --append-system-prompt`` — no
+mind-side composition.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
+import aiosqlite
 import requests
 
-LUCENT_URL = os.environ.get("LUCENT_URL_SELF", "http://127.0.0.1:8425")
+log = logging.getLogger(__name__)
+
+LUCENT_URL = os.environ.get("LUCENT_URL_HIVE", "http://hive-lucent:8424")
 LUCENT_BEARER = os.environ.get("LUCENT_BEARER_TOKEN", "")
 _AUTH_HEADERS = {"Authorization": f"Bearer {LUCENT_BEARER}"} if LUCENT_BEARER else {}
 
-# Caps — chars/4 ≈ tokens. Budget bounds, not strict.
 STANDING_RULES_CHAR_CAP = 2000   # ~500 tokens
 RECENT_MEMORY_CHAR_CAP = 6000    # ~1500 tokens
-
-REQUEST_TIMEOUT = 5  # seconds — bootstrap should never hang
-
-
-def load_standing_rules() -> str:
-    """Vector entries with tier=standing, flat-bullet block, ~500 token cap."""
-    entries = _list_entries()
-    standing = [e for e in entries if e.get("tier") == "standing"]
-    if not standing:
-        return ""
-    bullets = "\n".join(f"- {e.get('content', '').strip()}" for e in standing)
-    bullets = _truncate(bullets, STANDING_RULES_CHAR_CAP)
-    return f"<standing-rules>\n{bullets}\n</standing-rules>"
-
-
-def load_decay_weighted_recent() -> str:
-    """Top-20 contextual rows by recency decay."""
-    try:
-        resp = requests.get(
-            f"{LUCENT_URL}/memory/recent-decayed",
-            params={"limit": 20},
-            headers=_AUTH_HEADERS,
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        rows = resp.json()
-    except Exception:
-        return ""
-    if not isinstance(rows, list) or not rows:
-        return ""
-
-    parts: list[str] = []
-    for row in rows:
-        cls = row.get("data_class", "?")
-        content = (row.get("content") or "").strip().replace("\n", " ")
-        score = row.get("score", 0.0)
-        parts.append(f"- ({cls}) {content} [score={score:.2f}]")
-    body = _truncate("\n".join(parts), RECENT_MEMORY_CHAR_CAP)
-    return f"<recent-memory>\n{body}\n</recent-memory>"
+REQUEST_TIMEOUT = 5              # seconds — never hang spawn
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -73,19 +46,141 @@ def _truncate(text: str, max_chars: int) -> str:
     return f"{head}\n…"
 
 
-def _list_entries() -> list[dict[str, Any]]:
+def _get(path: str, params: dict[str, Any]) -> Any | None:
     try:
         resp = requests.get(
-            f"{LUCENT_URL}/memory/list",
-            params={"limit": 100},
+            f"{LUCENT_URL}{path}",
+            params=params,
             headers=_AUTH_HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
     except Exception:
-        return []
-    if not isinstance(data, dict):
-        return []
-    entries = data.get("entries")
-    return entries if isinstance(entries, list) else []
+        log.exception("lucent %s failed (params=%s)", path, params)
+        return None
+
+
+def _fetch_soul(mind_id: str, mind_name: str) -> str:
+    """Query the KG for the Mind node's soul_values; format as <soul> block."""
+    entity_name = mind_name.capitalize()
+    body = _get(
+        "/graph/query",
+        {"entity_name": entity_name, "mind_id": mind_id, "depth": 1},
+    )
+    if not isinstance(body, dict) or not body.get("found"):
+        return ""
+    matches = body.get("matches") or []
+    if not matches:
+        return ""
+    soul_values = (matches[0].get("properties") or {}).get("soul_values") or []
+    if not soul_values:
+        return ""
+    return "\n".join(["<soul>"] + list(soul_values) + ["</soul>"])
+
+
+def _fetch_standing_rules(mind_id: str) -> str:
+    """Union of this mind's UUID standing rules + the 'shared' sentinel."""
+    entries: list[dict[str, Any]] = []
+    for target in (mind_id, "shared"):
+        body = _get(
+            "/memory/list",
+            {"mind_id": target, "tier": "standing", "limit": 100},
+        )
+        if isinstance(body, dict):
+            got = body.get("entries")
+            if isinstance(got, list):
+                entries.extend(got)
+    if not entries:
+        return ""
+    seen: set[Any] = set()
+    bullets: list[str] = []
+    for e in entries:
+        eid = e.get("id")
+        if eid is not None and eid in seen:
+            continue
+        if eid is not None:
+            seen.add(eid)
+        content = (e.get("content") or "").strip()
+        if content:
+            bullets.append(f"- {content}")
+    if not bullets:
+        return ""
+    block = _truncate("\n".join(bullets), STANDING_RULES_CHAR_CAP)
+    return f"<standing-rules>\n{block}\n</standing-rules>"
+
+
+def _fetch_recent_memory(mind_id: str) -> str:
+    """Top-20 decay-weighted contextual rows for this mind."""
+    rows = _get("/memory/recent-decayed", {"mind_id": mind_id, "limit": 20})
+    if not isinstance(rows, list) or not rows:
+        return ""
+    parts: list[str] = []
+    for row in rows:
+        cls = row.get("data_class", "?")
+        content = (row.get("content") or "").strip().replace("\n", " ")
+        score = row.get("score", 0.0)
+        parts.append(f"- ({cls}) {content} [score={score:.2f}]")
+    body = _truncate("\n".join(parts), RECENT_MEMORY_CHAR_CAP)
+    return f"<recent-memory>\n{body}\n</recent-memory>"
+
+
+async def _fetch_session_memory(
+    db: aiosqlite.Connection, *, mind_id: str, client_ref: str | None
+) -> str:
+    """Latest rotation carry-forward row for (mind_id, client_ref)."""
+    if not client_ref:
+        return ""
+    try:
+        cursor = await db.execute(
+            """
+            SELECT body
+              FROM session_memory
+             WHERE mind_id = ? AND client_ref = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+            """,
+            (mind_id, client_ref),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    except Exception:
+        log.exception("session_memory read failed (mind_id=%s, client_ref=%s)", mind_id, client_ref)
+        return ""
+    if not row or not row["body"]:
+        return ""
+    return f"<session-memory>\n{row['body']}\n</session-memory>"
+
+
+async def compose_prompt_blocks(
+    *,
+    mind_id: str,
+    mind_name: str,
+    client_ref: str | None,
+    db: aiosqlite.Connection,
+) -> str:
+    """Build the full system-prompt content for a new session.
+
+    Returns the four data blocks concatenated. Empty blocks are dropped.
+    Never raises — every fetch is best-effort and logs on failure. A
+    missing component degrades the prompt but never blocks spawn.
+    """
+    blocks: list[str] = []
+
+    soul = _fetch_soul(mind_id, mind_name)
+    if soul:
+        blocks.append(soul)
+
+    standing = _fetch_standing_rules(mind_id)
+    if standing:
+        blocks.append(standing)
+
+    recent = _fetch_recent_memory(mind_id)
+    if recent:
+        blocks.append(recent)
+
+    session_memory = await _fetch_session_memory(db, mind_id=mind_id, client_ref=client_ref)
+    if session_memory:
+        blocks.append(session_memory)
+
+    return "\n\n".join(blocks)

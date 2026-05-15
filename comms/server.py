@@ -160,6 +160,20 @@ class RemoteControlResponse(BaseModel):
     rc_pid: int
 
 
+class RotationMemoryRequest(BaseModel):
+    """Written by the per-mind rotation_check hook on Stop events.
+
+    The hook summarizes the just-completed session transcript and POSTs
+    the body here. comms persists it in session_memory, keyed by
+    (mind_id, client_ref). The next session-create for that
+    (mind_id, client_ref) loads it as the <session-memory> carry-forward
+    block via bootstrap_loader.
+    """
+    mind_id: str
+    client_ref: str
+    body: str
+
+
 class BrokerMessageRequest(BaseModel):
     message_id: str | None = None
     conversation_id: str
@@ -293,6 +307,36 @@ async def switch_model(session_id: str, body: ModelSwitchRequest):
 @app.post("/sessions/{session_id}/autopilot")
 async def toggle_autopilot(session_id: str):
     return await session_mgr.toggle_autopilot(session_id)
+
+
+# ---------------------------------------------------------------------------
+# Rotation-memory endpoint
+# ---------------------------------------------------------------------------
+@app.post("/sessions/{session_id}/rotation-memory")
+async def write_rotation_memory(session_id: str, body: RotationMemoryRequest):
+    """Persist a rotation summary for (mind_id, client_ref).
+
+    Written by the per-mind ``rotation_check`` Stop hook when the
+    transcript crosses the rotation threshold. The next
+    ``create_session`` for the same (mind_id, client_ref) reads this row
+    via ``bootstrap_loader._fetch_session_memory`` and injects it as the
+    ``<session-memory>`` carry-forward block.
+    """
+    if not body.body.strip():
+        return JSONResponse({"error": "body required"}, status_code=400)
+    db = session_mgr._db
+    if db is None:
+        return JSONResponse({"error": "session manager not started"}, status_code=503)
+    # Resolve mind_name from broker.minds for symmetry with create_session.
+    row = await broker.get_mind_by_id(app.state.broker_db, body.mind_id)
+    mind_name = (row or {}).get("name") or body.mind_id
+    cursor = await db.execute(
+        """INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at)
+           VALUES (?, ?, ?, ?, ?, strftime('%s','now'))""",
+        (body.mind_id, mind_name, body.client_ref, session_id, body.body),
+    )
+    await db.commit()
+    return {"ok": True, "id": cursor.lastrowid}
 
 
 # ---------------------------------------------------------------------------

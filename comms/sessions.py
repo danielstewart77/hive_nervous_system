@@ -245,7 +245,34 @@ class SessionManager:
         # Graph is authoritative; MIND.md soul_seed is one-time bootstrap only
         soul_file = None
 
-        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id, is_group_session=(owner_type == "group"), client_ref=client_ref)
+        # Compose the system-prompt content for this mind. NS owns prompt
+        # composition; the mind passes the resulting string straight to
+        # ``claude --append-system-prompt``. See comms/bootstrap_loader.py.
+        from comms import bootstrap_loader  # noqa: PLC0415
+        from comms import broker  # noqa: PLC0415
+        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
+        mind_name = (mind_row or {}).get("name") or mind_id
+        system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
+            mind_id=mind_id,
+            mind_name=mind_name,
+            client_ref=client_ref,
+            db=self._db,
+        )
+
+        await self._spawn(
+            session_id,
+            model,
+            autopilot=False,
+            surface_prompt=surface_prompt,
+            allowed_directories=allowed_directories,
+            soul_file=soul_file,
+            mind_id=mind_id,
+            is_group_session=(owner_type == "group"),
+            client_ref=client_ref,
+            owner_type=owner_type,
+            owner_ref=owner_ref,
+            system_prompt_blocks=system_prompt_blocks,
+        )
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
         return await self._session_dict(session_id)
 
@@ -765,6 +792,9 @@ class SessionManager:
         mind_id: str,
         is_group_session: bool = False,
         client_ref: str | None = None,
+        owner_type: str | None = None,
+        owner_ref: str | None = None,
+        system_prompt_blocks: str = "",
     ) -> Any:
         row = await self._get_mind_row(mind_id)
         mind_url = row["gateway_url"]
@@ -782,6 +812,9 @@ class SessionManager:
                     "allowed_directories": allowed_directories,
                     "mind_name": mind_name,
                     "client_ref": client_ref,
+                    "owner_type": owner_type,
+                    "owner_ref": owner_ref,
+                    "system_prompt_blocks": system_prompt_blocks,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),
             )
