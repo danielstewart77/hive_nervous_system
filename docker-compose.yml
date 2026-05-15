@@ -7,10 +7,12 @@ services:
       # Join hive_mind's network so its containers can reach us as `hive-lucent:8424`.
       - hivemind
     ports:
-      # Host-side bind for direct curl/debugging and for Skippy (bare-metal,
-      # not on the hivemind docker network). Container-internal listeners
-      # come in via the `hivemind` network on port 8424.
-      - "127.0.0.1:8425:8424"
+      # Bind on 0.0.0.0 so remote minds on the LAN (and bare-metal Skippy
+      # on this host) can reach lucent. Bearer-token auth gates every
+      # non-health route, so LAN exposure is intentional.
+      # Container-internal listeners come in via the `hivemind` network on
+      # port 8424.
+      - "0.0.0.0:8425:8424"
     environment:
       LUCENT_API_PORT: "8424"
       LUCENT_DB_PATH: "/data/lucent.db"
@@ -40,9 +42,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      # Host bind for Skippy (bare-metal) to reach comms. Container-internal
-      # listeners come in via the hivemind network on 8424.
-      - "127.0.0.1:8426:8424"
+      # Bind on 0.0.0.0 so remote minds on the LAN (and bare-metal Skippy
+      # on this host) can reach the comms gateway. Bearer-token auth gates
+      # every non-health route. Container-internal listeners come in via
+      # the hivemind network on 8424.
+      - "0.0.0.0:8426:8424"
     environment:
       COMMS_PORT: "8424"
       COMMS_PROJECT_DIR: "/app"

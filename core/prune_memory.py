@@ -41,15 +41,17 @@ import requests
 log = logging.getLogger(__name__)
 
 LUCENT_URL = os.environ.get("LUCENT_URL_SELF", "http://127.0.0.1:8434")
+LUCENT_BEARER = os.environ.get("LUCENT_BEARER_TOKEN", "")
+_AUTH_HEADERS = {"Authorization": f"Bearer {LUCENT_BEARER}"} if LUCENT_BEARER else {}
 HIVE_TOOLS_URL = os.environ.get("HIVE_TOOLS_URL", "http://127.0.0.1:9421")
 HIVE_TOOLS_TOKEN = os.environ.get("HIVE_TOOLS_TOKEN", "")
 LUCENT_DB = Path(
     os.environ.get(
         "LUCENT_DB_PATH",
-        "/home/daniel/Storage/hive_mind_skippy/data/lucent.db",
+        "/data/lucent.db",
     )
 )
-MIND_ID = os.environ.get("MIND_ID", "skippy")
+MIND_ID = os.environ["MIND_ID"]
 REQUEST_TIMEOUT = 30
 
 # Per-class decay parameters (per the design).
@@ -98,7 +100,9 @@ def _read_class_entries(data_class: str, *, include_standing: bool = False) -> l
 def _delete_entry(entry_id: int) -> bool:
     try:
         resp = requests.delete(
-            f"{LUCENT_URL}/memory/{entry_id}", timeout=REQUEST_TIMEOUT
+            f"{LUCENT_URL}/memory/{entry_id}",
+            headers=_AUTH_HEADERS,
+            timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
         return True
@@ -359,11 +363,42 @@ def prune_feedback(*, now: float | None = None) -> dict:
 # Run all
 # ============================================================================
 
+def _reset_overflow_warning_if_under_cap() -> None:
+    """Remove the standing-cap-warned state file when the count drops back
+    to <= 10. Symmetric with the always_remember.sh trigger that creates
+    it on cross-up. The log root is per-mind (each mind ships its own
+    auto-remember pipeline), so this only runs if AUTO_REMEMBER_LOG_DIR
+    is set in the env.
+    """
+    log_root = os.environ.get("AUTO_REMEMBER_LOG_DIR")
+    if not log_root:
+        return
+    try:
+        resp = requests.get(
+            f"{LUCENT_URL}/memory/list",
+            params={"tier": "standing", "limit": 1},
+            headers=_AUTH_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        count = int(resp.json().get("total", 0))
+    except Exception:
+        return
+    warn_file = Path(log_root) / "standing-cap-warned"
+    if count <= 10 and warn_file.exists():
+        try:
+            warn_file.unlink()
+        except Exception:
+            pass
+
+
 def run_all() -> list[dict]:
     """Dispatch all four per-class pruners and aggregate the report."""
-    return [
+    out = [
         prune_ephemeral(),
         prune_current_state(),
         prune_future_state(),
         prune_feedback(),
     ]
+    _reset_overflow_warning_if_under_cap()
+    return out
