@@ -92,8 +92,10 @@ async def lifespan(app: FastAPI):
 
     # Register discovered minds in broker DB
     for mind in mind_registry.list_all():
+        # mind_id (UUID) is the durable routing key; name is a label.
         await broker.register_mind(
             app.state.broker_db,
+            mind_id=mind.mind_id,
             name=mind.name,
             gateway_url=mind.gateway_url,
             model=mind.model,
@@ -146,7 +148,7 @@ class CreateSessionRequest(BaseModel):
     model: str | None = None
     surface_prompt: str | None = None
     allowed_directories: list[str] | None = None
-    mind_id: str = "ada"
+    mind_id: str
 
 
 class ImageAttachment(BaseModel):
@@ -193,7 +195,8 @@ class BrokerMessageResponse(BaseModel):
 
 
 class RegisterMindRequest(BaseModel):
-    name: str
+    mind_id: str  # UUID — durable routing key
+    name: str     # display label
     gateway_url: str
     model: str
     harness: str
@@ -393,7 +396,7 @@ class CommandRequest(BaseModel):
     owner_type: str = "terminal"
     owner_ref: str = ""
     client_ref: str = ""
-    mind_id: str = "ada"
+    mind_id: str
 
 
 @app.post("/command")
@@ -525,10 +528,14 @@ async def broker_register_mind(body: RegisterMindRequest):
     """Register (or update) a mind in the broker database. Admin-only."""
     db = app.state.broker_db
     await broker.register_mind(
-        db, name=body.name, gateway_url=body.gateway_url,
-        model=body.model, harness=body.harness,
+        db,
+        mind_id=body.mind_id,
+        name=body.name,
+        gateway_url=body.gateway_url,
+        model=body.model,
+        harness=body.harness,
     )
-    return await broker.get_mind(db, body.name)
+    return await broker.get_mind_by_id(db, body.mind_id)
 
 
 @app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])

@@ -85,7 +85,7 @@ def _resolve_mind(mind_id: str) -> Any:
 # Memory helpers — run in executor (synchronous neo4j/requests calls)
 # ---------------------------------------------------------------------------
 
-def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
+def _fetch_memories_sync(query: str, mind_id: str) -> str | None:
     """Retrieve relevant memories for context seeding. Non-fatal."""
     try:
         import json
@@ -123,7 +123,7 @@ if os.environ.get("HOST_SPARK_DIR"):
     _PROJECT_DIR_NAMES[os.environ["HOST_SPARK_DIR"]] = "Spark to Bloom"
 
 
-def _fetch_soul_sync(mind_id: str = "ada") -> str | None:
+def _fetch_soul_sync(mind_id: str) -> str | None:
     """Load a mind's soul/identity from the knowledge graph. Returns formatted block or None."""
     import sys as _sys
     tools_path = str(PROJECT_DIR / "tools" / "stateful")
@@ -193,7 +193,8 @@ def _fetch_session_memory(mind_id: str, client_ref: str | None) -> str | None:
 def _build_base_prompt(
     allowed_directories: list[str] | None = None,
     soul_file: Path | None = None,
-    mind_id: str = "ada",
+    *,
+    mind_id: str,
     prompt_files: list[str] | None = None,
     client_ref: str | None = None,
 ) -> str:
@@ -421,7 +422,8 @@ class SessionManager:
         model: str | None = None,
         surface_prompt: str | None = None,
         allowed_directories: list[str] | None = None,
-        mind_id: str = "ada",
+        *,
+        mind_id: str,
     ) -> dict:
         """Create a new session, spawn process, return session info."""
         model = model or config.default_model
@@ -577,7 +579,7 @@ class SessionManager:
                 session["model"],
                 autopilot=bool(session["autopilot"]),
                 resume_sid=session["claude_sid"],
-                mind_id=session.get("mind_id", "ada"),
+                mind_id=session["mind_id"],
             )
             await self._db.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?", (session_id,)
@@ -605,7 +607,7 @@ class SessionManager:
                 log.info("send_message: refusing closed session=%s — caller must pick up new active session", session_id)
                 raise ValueError(f"Session {session_id} is closed")
 
-            mind_id = session.get("mind_id", "ada")
+            mind_id = session["mind_id"]
             log.info("send_message: start session=%s mind=%s", session_id, mind_id)
             t0 = time.monotonic()
 
@@ -814,7 +816,7 @@ class SessionManager:
             model,
             autopilot=bool(session["autopilot"]),
             resume_sid=session["claude_sid"],
-            mind_id=session.get("mind_id", "ada"),
+            mind_id=session["mind_id"],
         )
 
         result = await self._session_dict(session_id)
@@ -846,7 +848,7 @@ class SessionManager:
             session["model"],
             autopilot=bool(new_autopilot),
             resume_sid=session["claude_sid"],
-            mind_id=session.get("mind_id", "ada"),
+            mind_id=session["mind_id"],
         )
         return await self._session_dict(session_id)
 
@@ -957,7 +959,8 @@ class SessionManager:
         surface_prompt: str | None = None,
         allowed_directories: list[str] | None = None,
         soul_file: Path | None = None,
-        mind_id: str = "ada",
+        *,
+        mind_id: str,
         is_group_session: bool = False,
         client_ref: str | None = None,
     ) -> Any:
@@ -1148,7 +1151,7 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Group session management
     # ------------------------------------------------------------------
-    async def create_group_session(self, moderator_mind_id: str = "ada") -> dict:
+    async def create_group_session(self, moderator_mind_id: str) -> dict:
         """Create a new group session."""
         assert self._db is not None
         group_id = str(uuid.uuid4())

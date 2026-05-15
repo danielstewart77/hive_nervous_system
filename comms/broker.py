@@ -45,6 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 
 CREATE TABLE IF NOT EXISTS minds (
+    mind_id        TEXT NOT NULL UNIQUE,
     name           TEXT PRIMARY KEY,
     gateway_url    TEXT NOT NULL,
     model          TEXT NOT NULL,
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS minds (
     registered_at  REAL NOT NULL,
     last_seen      REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_minds_mind_id ON minds(mind_id);
 
 CREATE TABLE IF NOT EXISTS secret_scopes (
     mind_name   TEXT NOT NULL,
@@ -414,6 +416,7 @@ async def wakeup_and_collect(
 async def register_mind(
     db: aiosqlite.Connection,
     *,
+    mind_id: str,
     name: str,
     gateway_url: str,
     model: str,
@@ -421,40 +424,68 @@ async def register_mind(
 ) -> None:
     """Register (or update) a mind in the broker database.
 
-    If the mind already exists, updates gateway_url/model/harness/last_seen
-    but preserves registered_at.
+    If the mind already exists (matched by mind_id), updates the mutable
+    fields and preserves registered_at. The UUID `mind_id` is the durable
+    identity; `name` is a human-readable label that may be renamed.
     """
     now = time.time()
     row = await db.execute(
-        "SELECT registered_at FROM minds WHERE name = ?", (name,)
+        "SELECT registered_at FROM minds WHERE mind_id = ?", (mind_id,)
     )
     existing = await row.fetchone()
 
     if existing:
         await db.execute(
-            "UPDATE minds SET gateway_url=?, model=?, harness=?, last_seen=? WHERE name=?",
-            (gateway_url, model, harness, now, name),
+            "UPDATE minds SET name=?, gateway_url=?, model=?, harness=?, last_seen=? WHERE mind_id=?",
+            (name, gateway_url, model, harness, now, mind_id),
         )
     else:
         await db.execute(
-            "INSERT INTO minds (name, gateway_url, model, harness, registered_at, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (name, gateway_url, model, harness, now, now),
+            "INSERT INTO minds (mind_id, name, gateway_url, model, harness, registered_at, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (mind_id, name, gateway_url, model, harness, now, now),
         )
     await db.commit()
 
 
 async def get_registered_minds(db: aiosqlite.Connection) -> list[dict]:
-    """Return all registered minds as a list of dicts."""
+    """Return all registered minds as a list of dicts.
+
+    Response shape per the migration spec: each entry includes `id` (the
+    UUID), `name` (display label), and `gateway_url` (where to dispatch).
+    """
     rows = await db.execute("SELECT * FROM minds ORDER BY name")
-    return [dict(r) for r in await rows.fetchall()]
+    result = []
+    for r in await rows.fetchall():
+        d = dict(r)
+        # Surface mind_id as `id` per the broker-minds API contract.
+        d["id"] = d.pop("mind_id")
+        result.append(d)
+    return result
 
 
 async def get_mind(db: aiosqlite.Connection, name: str) -> dict | None:
-    """Get a single mind by name. Returns dict or None if not found."""
+    """Get a single mind by display name. Returns dict or None if not found."""
     row = await db.execute("SELECT * FROM minds WHERE name = ?", (name,))
     result = await row.fetchone()
-    return dict(result) if result else None
+    if not result:
+        return None
+    d = dict(result)
+    d["id"] = d.pop("mind_id")
+    return d
+
+
+async def get_mind_by_id(db: aiosqlite.Connection, mind_id: str) -> dict | None:
+    """Get a single mind by UUID (mind_id). The canonical routing lookup —
+    broker resolves mind_id → gateway_url through this function.
+    """
+    row = await db.execute("SELECT * FROM minds WHERE mind_id = ?", (mind_id,))
+    result = await row.fetchone()
+    if not result:
+        return None
+    d = dict(result)
+    d["id"] = d.pop("mind_id")
+    return d
 
 
 async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | None:
