@@ -52,12 +52,18 @@ class UpdateBody(BaseModel):
 
 @router.get("/list")
 def memory_list(
-    mind_id: str = Query("ada"),
+    mind_id: str | None = Query(None),
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
     tier: str | None = Query(None),
 ) -> Any:
-    """List memories sequentially by creation time. Optional ``tier`` filter."""
+    """List memories sequentially by creation time.
+
+    Optional ``tier`` and ``mind_id`` filters. ``mind_id`` is opt-in —
+    omit for cross-mind reads (default REQ-006 behavior), pass exactly
+    when you want a provenance filter (e.g. the bootstrap-loader's
+    per-mind + ``shared`` standing-rules union).
+    """
     from lucent_api.lucent_memory import memory_list as _memory_list
 
     return _decode(

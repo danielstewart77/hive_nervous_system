@@ -281,59 +281,58 @@ def memory_store(
 def memory_list(
     offset: int = 0,
     limit: int = 25,
-    mind_id: str = "ada",
+    mind_id: str | None = None,
     tier: str | None = None,
 ) -> str:
-    """List all memories sequentially by creation time for review and cleanup.
+    """List memories sequentially by creation time for review and cleanup.
 
     Args:
         offset: Number of entries to skip (for pagination).
         limit: Number of entries to return (default 25, max 100).
-        mind_id: Accepted for backwards compatibility but ignored — mind_id
-            is provenance only and does not filter reads (REQ-006).
+        mind_id: Optional filter. When set, returns only entries whose
+            provenance ``mind_id`` matches exactly. When omitted, returns
+            entries from every mind (cross-mind read; REQ-006's original
+            "provenance only, never a filter" still applies as the default).
+            The standing-rules bootstrap path uses this to fetch a mind's
+            own rules plus the "shared" sentinel with two calls and union
+            client-side.
         tier: Optional filter — when set, only entries matching this tier
             are returned (and counted in total). Useful for the bootstrap
-            loader's standing-tier subset, which would otherwise need to
-            paginate through the entire store.
+            loader's standing-tier subset.
 
     Returns:
         JSON with entries, offset, limit, and total count.
     """
-    del mind_id  # REQ-006: mind_id is not a query filter on reads.
     limit = min(limit, 100)
+
+    where_parts: list[str] = []
+    params: list = []
+    if tier:
+        where_parts.append("tier = ?")
+        params.append(tier)
+    if mind_id:
+        where_parts.append("mind_id = ?")
+        params.append(mind_id)
+    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
     try:
         conn = _get_conn()
-        if tier:
-            total_row = conn.execute(
-                "SELECT COUNT(*) AS total FROM memories WHERE tier = ?", (tier,)
-            ).fetchone()
-        else:
-            total_row = conn.execute(
-                "SELECT COUNT(*) AS total FROM memories"
-            ).fetchone()
+        total_row = conn.execute(
+            f"SELECT COUNT(*) AS total FROM memories {where_clause}",
+            params,
+        ).fetchone()
         total = total_row["total"]
 
-        if tier:
-            rows = conn.execute(
-                """
-                SELECT id, content, tags, source, data_class, tier, mind_id, created_at
-                FROM memories
-                WHERE tier = ?
-                ORDER BY created_at ASC
-                LIMIT ? OFFSET ?
-                """,
-                (tier, limit, offset),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT id, content, tags, source, data_class, tier, mind_id, created_at
-                FROM memories
-                ORDER BY created_at ASC
-                LIMIT ? OFFSET ?
-                """,
-                (limit, offset),
-            ).fetchall()
+        rows = conn.execute(
+            f"""
+            SELECT id, content, tags, source, data_class, tier, mind_id, created_at
+            FROM memories
+            {where_clause}
+            ORDER BY created_at ASC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        ).fetchall()
 
         entries = [
             {
