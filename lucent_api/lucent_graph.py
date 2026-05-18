@@ -108,7 +108,7 @@ def graph_upsert_direct(
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
-    """Write to the knowledge graph without HITL. Called by the epilogue after batch approval."""
+    """Write to the knowledge graph without HITL."""
     try:
         try:
             validate_source(source)

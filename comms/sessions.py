@@ -104,7 +104,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at    REAL NOT NULL,
     last_active   REAL NOT NULL,
     status        TEXT NOT NULL DEFAULT 'running',
-    epilogue_status TEXT DEFAULT NULL,
     mind_id       TEXT DEFAULT 'ada',
     group_session_id TEXT
 );
@@ -166,14 +165,15 @@ class SessionManager:
         await self._db.execute("PRAGMA foreign_keys = ON")
         await self._db.executescript(_SCHEMA)
         await self._db.commit()
-        # Migration: add epilogue_status column for existing databases
+        # Migration: drop the legacy epilogue_status column if it survives
+        # from earlier deployments. The epilogue subsystem was removed.
         try:
             await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN epilogue_status TEXT DEFAULT NULL"
+                "ALTER TABLE sessions DROP COLUMN epilogue_status"
             )
             await self._db.commit()
         except Exception:
-            pass  # Column already exists
+            pass  # Column already gone (or sqlite < 3.35 — column is harmless)
         # Migration: add mind_id column for existing databases
         try:
             await self._db.execute(
@@ -1151,23 +1151,6 @@ class SessionManager:
             return path
         return None
 
-    # ------------------------------------------------------------------
-    # Epilogue
-    # ------------------------------------------------------------------
-    async def get_sessions_pending_epilogue(self) -> list[dict]:
-        """Return sessions eligible for epilogue processing."""
-        rows = await self._db.execute(
-            "SELECT * FROM sessions WHERE status IN ('idle', 'closed') AND epilogue_status IS NULL AND owner_type != 'broker'"
-        )
-        return [dict(r) for r in await rows.fetchall()]
-
-    async def set_epilogue_status(self, session_id: str, status: str) -> None:
-        """Update the epilogue_status column for a session."""
-        await self._db.execute(
-            "UPDATE sessions SET epilogue_status = ? WHERE id = ?", (status, session_id)
-        )
-        await self._db.commit()
-
     async def _session_dict(self, session_id: str) -> dict | None:
         row = await self._get_row(session_id)
         if not row:
@@ -1183,6 +1166,5 @@ class SessionManager:
             "created_at": row["created_at"],
             "last_active": row["last_active"],
             "status": row["status"],
-            "epilogue_status": row.get("epilogue_status"),
             "mind_id": row.get("mind_id", "ada"),
         }

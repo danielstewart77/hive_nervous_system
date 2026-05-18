@@ -120,7 +120,7 @@ def check_orphan_guard(
     Args:
         relation: Relationship type (e.g. "MANAGES").
         target_name: Name of the target node.
-        grace_period: If True, allow orphan writes (for epilogue use).
+        grace_period: If True, allow orphan writes (for batched two-phase writes that insert nodes before edges).
 
     Returns:
         Tuple of (allowed, error_message). If allowed, error_message is "".

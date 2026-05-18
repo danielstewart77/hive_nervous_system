@@ -136,7 +136,7 @@ def memory_store_direct(
     recurring: bool | None = None,
     codebase_ref: str | None = None,
 ) -> str:
-    """Write to vector memory without HITL. Called by the epilogue after batch approval.
+    """Write to vector memory without HITL.
 
     Tier defaults to ``contextual``. Pass ``tier="standing"`` only from
     /always-remember. Skips the insert when an entry of the same data_class
