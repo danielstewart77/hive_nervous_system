@@ -838,6 +838,101 @@ async def linkedin_callback(code: str | None = None, state: str | None = None, e
 
 
 # ---------------------------------------------------------------------------
+# SMS inbound webhook (sms-gate.app local-server mode)
+# ---------------------------------------------------------------------------
+from comms.sms_inbound import (
+    extract_message_fields,
+    format_dispatch_content,
+    verify_signature,
+)
+
+
+@app.post("/sms/inbound")
+async def sms_inbound(request: Request):
+    """Receive an SMS/MMS webhook from the sms-gate.app Android client.
+
+    Verifies HMAC-SHA256 against `SMS_INBOUND_HMAC_SECRET`, extracts the
+    message fields permissively (the public docs are stale on
+    `mms:downloaded`), and dispatches a broker message to Ada keyed on the
+    sender phone number so back-and-forth threads to one conversation.
+    """
+    secret = os.environ.get("SMS_INBOUND_HMAC_SECRET", "").strip()
+    if not secret:
+        log.error("sms/inbound: SMS_INBOUND_HMAC_SECRET not configured")
+        return JSONResponse({"error": "server misconfigured"}, status_code=500)
+
+    body = await request.body()
+    signature = request.headers.get("x-signature", "")
+    timestamp = request.headers.get("x-timestamp", "")
+
+    if not verify_signature(body, timestamp, signature, secret):
+        log.warning(
+            "sms/inbound: HMAC verification failed sig_present=%s ts_present=%s body_bytes=%d",
+            bool(signature), bool(timestamp), len(body),
+        )
+        return JSONResponse({"error": "invalid signature"}, status_code=401)
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        log.warning("sms/inbound: invalid JSON body: %s", e)
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    log.info("sms/inbound: payload %s", payload)
+    fields = extract_message_fields(payload)
+    log.info(
+        "sms/inbound: event=%s sender=%s text=%r message_id=%s",
+        fields.get("event"), fields.get("sender"), fields.get("text"), fields.get("message_id"),
+    )
+
+    ada = await broker.get_mind(app.state.broker_db, "ada")
+    if not ada:
+        log.error("sms/inbound: ada not registered in broker.minds — dropping")
+        return JSONResponse({"status": "ack-no-recipient"}, status_code=200)
+
+    sender = fields.get("sender") or "unknown"
+    conversation_id = f"sms-{sender}"
+    message_id = str(uuid.uuid4())
+    content = format_dispatch_content(sender, fields.get("text"))
+
+    message_number = await broker.get_next_message_number(app.state.broker_db, conversation_id)
+    insert_result = await broker.insert_message(
+        app.state.broker_db,
+        message_id=message_id,
+        conversation_id=conversation_id,
+        from_mind="sms-gateway",
+        to_mind=ada["id"],
+        message_number=message_number,
+        content=content,
+        rolling_summary="",
+        metadata={
+            "source": "sms-inbound",
+            "sender": sender,
+            "gateway_message_id": fields.get("message_id"),
+            "event": fields.get("event"),
+            "received_at": fields.get("received_at"),
+        },
+        status="pending",
+    )
+    if insert_result.get("existing"):
+        return {"status": "duplicate", "message_id": message_id}
+
+    asyncio.create_task(broker.wakeup_and_collect(
+        app.state.broker_db, session_mgr,
+        message_id=message_id,
+        conversation_id=conversation_id,
+        from_mind="sms-gateway",
+        to_mind=ada["id"],
+        content=content,
+        rolling_summary="",
+        message_number=message_number,
+        metadata={"source": "sms-inbound", "sender": sender},
+    ))
+
+    return {"status": "dispatched", "message_id": message_id}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

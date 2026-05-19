@@ -21,12 +21,20 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 log = logging.getLogger(__name__)
 
+# Endpoints with their own request-level auth (HMAC, signature, etc.) that
+# would be incorrectly gated by the global bearer middleware.
+BEARER_EXEMPT_PATHS = frozenset({"/sms/inbound"})
 
-def require_bearer(authorization: str = Header(default="")) -> None:
+
+def require_bearer(
+    request: Request, authorization: str = Header(default="")
+) -> None:
+    if request.url.path in BEARER_EXEMPT_PATHS:
+        return
     expected = os.environ.get("COMMS_BEARER_TOKEN", "")
     admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
     if not expected:
