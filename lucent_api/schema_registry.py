@@ -1,9 +1,8 @@
 """Knowledge graph schema source of truth.
 
-Hardcoded for now per design decision 2026-05-10. The companion human-facing
-spec at `spark_to_bloom/src/backlog/knowledge-graph-tidy.md` exists for
-documentation; this file is what the running system trusts. Once enforcement
-is in place and migration has run, the backlog file gets deleted.
+Hardcoded for now per design decision 2026-05-10. This file is what the
+running system trusts at first init; the validator reads the seeded
+schema_types / schema_edges tables thereafter.
 
 Schema shape per type:
     name → {
@@ -137,38 +136,6 @@ SCHEMA_TYPES: dict[str, dict] = {
         "enums": {
             "kind": ["military", "financial", "career", "personal", "move", "health", "award", "travel"],
         },
-    },
-    # ---- Mind facets ----
-    "Skill": {
-        "kind": "second-class",
-        "required": ["name"],
-        "optional": ["source", "last_used"],
-        "enums": {
-            "source": ["user-config", "plugin", "built-in"],
-        },
-    },
-    "Tool": {
-        "kind": "second-class",
-        "required": ["name"],
-        "optional": ["source"],
-        "enums": {
-            "source": ["mcp", "builtin", "http"],
-        },
-    },
-    "Runtime": {
-        "kind": "second-class",
-        "required": ["harness"],
-        "optional": ["provider"],
-        "enums": {
-            "harness": ["claude_cli", "codex_cli", "claude_sdk", "codex_sdk"],
-            "provider": ["anthropic", "ollama", "openai"],
-        },
-    },
-    "SoulValue": {
-        "kind": "second-class",
-        "required": ["text"],
-        "optional": ["as_of"],
-        "enums": {},
     },
     # ---- Device facets ----
     "OS": {
@@ -328,54 +295,6 @@ SCHEMA_EDGES: dict[str, dict] = {
         "target_type": "Organization",
         "required_attrs": [],
         "optional_attrs": ["role", "title", "since", "until"],
-        "enums": {},
-        "symmetric": False,
-    },
-    "OWNED_BY": {
-        "source_type": "Mind",
-        "target_type": "Person",
-        "required_attrs": [],
-        "optional_attrs": [],
-        "enums": {},
-        "symmetric": False,
-    },
-    "CREATED_BY": {
-        "source_type": "Mind",
-        "target_type": "Person",
-        "required_attrs": [],
-        "optional_attrs": ["since"],
-        "enums": {},
-        "symmetric": False,
-    },
-    "HAS_SKILL": {
-        "source_type": "Mind",
-        "target_type": "Skill",
-        "required_attrs": [],
-        "optional_attrs": ["last_used"],
-        "enums": {},
-        "symmetric": False,
-    },
-    "HAS_TOOL": {
-        "source_type": "Mind",
-        "target_type": "Tool",
-        "required_attrs": [],
-        "optional_attrs": [],
-        "enums": {},
-        "symmetric": False,
-    },
-    "RUNS_AS": {
-        "source_type": "Mind",
-        "target_type": "Runtime",
-        "required_attrs": [],
-        "optional_attrs": [],
-        "enums": {},
-        "symmetric": False,
-    },
-    "EMBODIES": {
-        "source_type": "Mind",
-        "target_type": "SoulValue",
-        "required_attrs": [],
-        "optional_attrs": [],
         "enums": {},
         "symmetric": False,
     },

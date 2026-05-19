@@ -194,15 +194,6 @@ class ValidateEdgeTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(code, "unknown_attr")
 
-    def test_mind_to_skill_edge_passes(self):
-        ok, _, _ = validate_edge("HAS_SKILL", "Mind", "Skill", conn=self.conn)
-        self.assertTrue(ok)
-
-    def test_mind_skill_wrong_direction_rejected(self):
-        ok, code, _ = validate_edge("HAS_SKILL", "Skill", "Mind", conn=self.conn)
-        self.assertFalse(ok)
-        self.assertEqual(code, "invalid_edge_direction")
-
     def test_has_education_edge_passes(self):
         ok, _, _ = validate_edge("HAS_EDUCATION", "Person", "Education", conn=self.conn)
         self.assertTrue(ok)
