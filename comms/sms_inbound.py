@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import uuid
 from typing import Any
 
 
@@ -63,3 +64,15 @@ def format_dispatch_content(sender: str | None, text: str | None) -> str:
     s = sender or "unknown sender"
     t = text or "(no text in webhook payload)"
     return f"Inbound SMS from {s}: {t}"
+
+
+def build_broker_message_id(sender: str | None, gateway_message_id: str | None) -> str:
+    """Stable broker message_id for an inbound SMS/MMS webhook.
+
+    The sms-gate.app client retries non-2xx deliveries, so the broker needs
+    a deterministic dedup key. Compose from (sender, gateway message id);
+    fall back to a UUID when either is missing.
+    """
+    if sender and gateway_message_id:
+        return f"sms-{sender}-{gateway_message_id}"
+    return str(uuid.uuid4())

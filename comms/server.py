@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import aiohttp
-from fastapi import Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -841,10 +841,41 @@ async def linkedin_callback(code: str | None = None, state: str | None = None, e
 # SMS inbound webhook (sms-gate.app local-server mode)
 # ---------------------------------------------------------------------------
 from comms.sms_inbound import (
+    build_broker_message_id,
     extract_message_fields,
     format_dispatch_content,
     verify_signature,
 )
+
+
+SMS_INBOUND_ENABLED_KEY = "sms_inbound_enabled"
+
+
+async def _sms_inbound_enabled() -> bool:
+    """Read the toggle flag. Default False — opt-in, off by default."""
+    value = await broker.get_setting(
+        app.state.broker_db, SMS_INBOUND_ENABLED_KEY, default="false"
+    )
+    return value == "true"
+
+
+@app.get("/sms/inbound/enabled")
+async def get_sms_inbound_enabled():
+    """Report whether inbound SMS processing is active."""
+    return {"enabled": await _sms_inbound_enabled()}
+
+
+@app.put("/sms/inbound/enabled")
+async def set_sms_inbound_enabled(body: dict):
+    """Toggle inbound SMS processing on or off."""
+    if "enabled" not in body or not isinstance(body["enabled"], bool):
+        raise HTTPException(400, "body must be {\"enabled\": bool}")
+    await broker.set_setting(
+        app.state.broker_db,
+        SMS_INBOUND_ENABLED_KEY,
+        "true" if body["enabled"] else "false",
+    )
+    return {"enabled": body["enabled"]}
 
 
 @app.post("/sms/inbound")
@@ -855,7 +886,14 @@ async def sms_inbound(request: Request):
     message fields permissively (the public docs are stale on
     `mms:downloaded`), and dispatches a broker message to Ada keyed on the
     sender phone number so back-and-forth threads to one conversation.
+
+    Honors the `sms_inbound_enabled` setting — when off, returns 200 with
+    `{"status": "disabled"}` so sms-gate.app doesn't retry, but skips
+    HMAC verification, broker insertion, and dispatch entirely.
     """
+    if not await _sms_inbound_enabled():
+        return {"status": "disabled"}
+
     secret = os.environ.get("SMS_INBOUND_HMAC_SECRET", "").strip()
     if not secret:
         log.error("sms/inbound: SMS_INBOUND_HMAC_SECRET not configured")
@@ -892,7 +930,7 @@ async def sms_inbound(request: Request):
 
     sender = fields.get("sender") or "unknown"
     conversation_id = f"sms-{sender}"
-    message_id = str(uuid.uuid4())
+    message_id = build_broker_message_id(sender, fields.get("message_id"))
     content = format_dispatch_content(sender, fields.get("text"))
 
     message_number = await broker.get_next_message_number(app.state.broker_db, conversation_id)

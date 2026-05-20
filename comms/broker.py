@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS secret_scopes (
     granted_at  REAL NOT NULL,
     PRIMARY KEY (mind_name, secret_key)
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 # ---------------------------------------------------------------------------
@@ -130,16 +136,10 @@ async def insert_message(
 ) -> dict:
     """Insert a message. Idempotent on message_id — returns existing row if duplicate.
 
-    Auto-creates the conversation row if it doesn't exist.
+    Auto-creates the conversation row if it doesn't exist. Uses INSERT OR IGNORE
+    on the PK so concurrent duplicate deliveries (sms-gateway retries the same
+    webhook on any non-2xx) collapse cleanly instead of racing on the SELECT.
     """
-    # Check for existing message (idempotency)
-    row = await db.execute("SELECT * FROM messages WHERE id = ?", (message_id,))
-    existing = await row.fetchone()
-    if existing:
-        result = dict(existing)
-        result["existing"] = True
-        return result
-
     # Auto-create conversation
     await db.execute(
         "INSERT OR IGNORE INTO conversations (id, created_at) VALUES (?, ?)",
@@ -147,20 +147,21 @@ async def insert_message(
     )
 
     metadata_json = json.dumps(metadata) if metadata else None
-    await db.execute(
-        """INSERT INTO messages
+    cursor = await db.execute(
+        """INSERT OR IGNORE INTO messages
            (id, conversation_id, from_mind, to_mind, message_number, content,
             rolling_summary, metadata, status, timestamp)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (message_id, conversation_id, from_mind, to_mind, message_number,
          content, rolling_summary, metadata_json, status, time.time()),
     )
+    inserted = cursor.rowcount > 0
     await db.commit()
 
     row = await db.execute("SELECT * FROM messages WHERE id = ?", (message_id,))
     fetched = await row.fetchone()
     result = dict(fetched) if fetched else {"id": message_id}
-    result["existing"] = False
+    result["existing"] = not inserted
     return result
 
 
@@ -564,3 +565,26 @@ async def check_secret_scope(
         (mind_name, secret_key),
     )
     return await row.fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# Settings (small key/value store for runtime feature flags)
+# ---------------------------------------------------------------------------
+async def get_setting(
+    db: aiosqlite.Connection, key: str, default: str | None = None
+) -> str | None:
+    """Return the stored value for a settings key, or `default` if absent."""
+    row = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    fetched = await row.fetchone()
+    return fetched["value"] if fetched else default
+
+
+async def set_setting(db: aiosqlite.Connection, key: str, value: str) -> None:
+    """Upsert a settings row."""
+    await db.execute(
+        """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                          updated_at = excluded.updated_at""",
+        (key, value, time.time()),
+    )
+    await db.commit()
