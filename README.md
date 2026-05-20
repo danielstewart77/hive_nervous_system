@@ -65,6 +65,7 @@ The full design, implementation playbook, and verifiable requirements live under
 - **[Design](./docs/memory-system-design.md)** — mind-agnostic architecture: rotation, four-layer bootstrap, capture pipeline, pruning, graph query semantics. Read this first.
 - **[Implementation](./docs/memory-system-implementation.md)** — adopter playbook. How a mind plugs into the shared service: env, identity convention, hooks per harness, verification checklist, "Constraints (don't relearn)".
 - **[Requirements](./docs/memory-system-requirements.md)** — 84 verifiable requirements across 15 sections, each with a verification method.
+- **[Session prompt composition](./docs/session-prompt-composition.md)** — what `comms/bootstrap_loader.py::compose_prompt_blocks` builds (soul + standing + decay-weighted recent + session-memory carry-forward), the dispatch payload contract, and how the composed string is shipped to each mind's harness.
 
 ## Pruning
 
