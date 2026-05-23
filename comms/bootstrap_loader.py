@@ -5,12 +5,15 @@ session, it calls ``compose_prompt_blocks`` here to assemble the
 system-prompt content from per-mind data:
 
 1. ``<soul>`` — from lucent KG, per-mind UUID
-2. ``<standing-rules>`` — from lucent vector store, tier=standing,
-   union of this mind's UUID and ``mind_id="shared"``
-3. ``<recent-memory>`` — from lucent vector store, decay-weighted
+2. ``<recent-memory>`` — from lucent vector store, decay-weighted
    contextual entries, per-mind
-4. ``<session-memory>`` — from comms's own ``session_memory`` table,
+3. ``<session-memory>`` — from comms's own ``session_memory`` table,
    the latest rotation carry-forward for this ``(mind_id, client_ref)``
+
+Standing rules are no longer composed here — they are injected per-turn
+by the mind's UserPromptSubmit hook (~/.claude/hooks/contextual_retrieval.py).
+This keeps the standing block hot across the whole session rather than
+freezing it at spawn time, and makes the rule set editable mid-session.
 
 The composed string is shipped to the mind's ``mind_server`` via the
 ``system_prompt_blocks`` field of the ``/sessions`` POST. The mind
@@ -32,7 +35,6 @@ LUCENT_URL = os.environ.get("LUCENT_URL_HIVE", "http://hive-lucent:8424")
 LUCENT_BEARER = os.environ.get("LUCENT_BEARER_TOKEN", "")
 _AUTH_HEADERS = {"Authorization": f"Bearer {LUCENT_BEARER}"} if LUCENT_BEARER else {}
 
-STANDING_RULES_CHAR_CAP = 2000   # ~500 tokens
 RECENT_MEMORY_CHAR_CAP = 6000    # ~1500 tokens
 REQUEST_TIMEOUT = 5              # seconds — never hang spawn
 
@@ -77,37 +79,6 @@ def _fetch_soul(mind_id: str, mind_name: str) -> str:
     if not soul_values:
         return ""
     return "\n".join(["<soul>"] + list(soul_values) + ["</soul>"])
-
-
-def _fetch_standing_rules(mind_id: str) -> str:
-    """Union of this mind's UUID standing rules + the 'shared' sentinel."""
-    entries: list[dict[str, Any]] = []
-    for target in (mind_id, "shared"):
-        body = _get(
-            "/memory/list",
-            {"mind_id": target, "tier": "standing", "limit": 100},
-        )
-        if isinstance(body, dict):
-            got = body.get("entries")
-            if isinstance(got, list):
-                entries.extend(got)
-    if not entries:
-        return ""
-    seen: set[Any] = set()
-    bullets: list[str] = []
-    for e in entries:
-        eid = e.get("id")
-        if eid is not None and eid in seen:
-            continue
-        if eid is not None:
-            seen.add(eid)
-        content = (e.get("content") or "").strip()
-        if content:
-            bullets.append(f"- {content}")
-    if not bullets:
-        return ""
-    block = _truncate("\n".join(bullets), STANDING_RULES_CHAR_CAP)
-    return f"<standing-rules>\n{block}\n</standing-rules>"
 
 
 def _fetch_recent_memory(mind_id: str) -> str:
@@ -184,10 +155,6 @@ async def compose_prompt_blocks(
     soul = _fetch_soul(mind_id, mind_name)
     if soul:
         blocks.append(soul)
-
-    standing = _fetch_standing_rules(mind_id)
-    if standing:
-        blocks.append(standing)
 
     recent = _fetch_recent_memory(mind_id)
     if recent:

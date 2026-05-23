@@ -42,7 +42,10 @@ DATA_CLASS_REGISTRY: dict[str, DataClassDef] = {
     ),
 }
 
-VALID_SOURCES = {"user", "tool", "session", "self", "always-remember"}
+VALID_SOURCES = {
+    "user", "tool", "session", "self", "always-remember",
+    "session-rotation", "session-rotation-backfill",
+}
 VALID_TIERS = {"contextual", "standing"}
 
 RECURRING_KEYWORDS: frozenset[str] = frozenset({
