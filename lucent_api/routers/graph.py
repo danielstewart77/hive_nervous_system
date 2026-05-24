@@ -164,9 +164,11 @@ def search_person(
 # ---- Write endpoints (guarded but un-HITL'd) ----
 
 
-@router.post("/upsert")
-def graph_upsert(body: UpsertBody) -> Any:
-    """Add or update a graph node, optionally linking to another node.
+@router.post("/upsert-backup")
+def graph_upsert_backup(body: UpsertBody) -> Any:
+    """Legacy un-validated upsert, kept as a fallback during the schema-enforcement cutover. Delete once `/graph/upsert` (now schema-validating) is proven stable.
+
+    Add or update a graph node, optionally linking to another node.
 
     **Full-replace semantics.** The ``properties`` blob you send REPLACES
     the existing properties on the node. Keys not in the request are
@@ -217,12 +219,12 @@ def graph_upsert(body: UpsertBody) -> Any:
             )
         )
     except Exception as e:
-        log.exception("graph_upsert failed")
+        log.exception("graph_upsert_backup failed")
         return {"upserted": False, "error": str(e)}
 
 
-@router.post("/upsert-strict")
-def graph_upsert_strict(body: UpsertBody) -> Any:
+@router.post("/upsert")
+def graph_upsert(body: UpsertBody) -> Any:
     """Schema-validated upsert.
 
     Runs the schema validations from `schema_registry` BEFORE the existing
@@ -262,7 +264,7 @@ def graph_upsert_strict(body: UpsertBody) -> Any:
                 return {
                     "ok": False,
                     "code": "missing_target_type",
-                    "detail": "target_type is required when relation is set on /graph/upsert-strict",
+                    "detail": "target_type is required when relation is set on /graph/upsert",
                 }
             edge_attrs = _json.loads(body.edge_attrs) if body.edge_attrs.strip() != "{}" else {}
             ok, code, detail = validate_edge(
@@ -316,7 +318,7 @@ def graph_upsert_strict(body: UpsertBody) -> Any:
             return {"ok": False, "code": "write_error", "detail": write_result["error"]}
         return {"ok": True, **(write_result if isinstance(write_result, dict) else {})}
     except Exception as e:
-        log.exception("graph_upsert_strict failed")
+        log.exception("graph_upsert failed")
         return {"ok": False, "code": "internal_error", "detail": str(e)}
 
 
