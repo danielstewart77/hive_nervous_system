@@ -80,7 +80,8 @@ All bearer-gated except `/health`.
 | `DELETE /memory/{id}` | delete |
 | `GET /graph/query?entity_name=<name>&mind_id=<id>&depth=<n>` | identity lookup |
 | `GET /graph/search?text=<q>&limit=<n>` | mention search |
-| `POST /graph/upsert` | write node + optional edge (with orphan/disambiguation guards) |
+| `POST /graph/upsert` | write node + optional edge — **schema-validated** (`validate_node` / `validate_edge` from `schema_registry`) ahead of the orphan/disambiguation guards. Returns `{ok: bool, code?, detail?, ...}` |
+| `POST /graph/upsert-backup` | legacy un-validated handler, parked during the schema-enforcement cutover. Returns `{upserted: bool, reason?: ...}`. Delete once stable. |
 | `POST /graph/upsert-direct` | write node directly (skips orphan/disambiguation guards; identity guard still applies) |
 
 ### Database schema
@@ -504,10 +505,13 @@ upfront for the next adopter.
 
 ### `lucent /graph/upsert`
 
-- **Full-replace** semantics on the `properties` JSON blob (`ON CONFLICT(mind_id, name) DO UPDATE SET properties = excluded.properties, ...`). Anything not passed back is wiped.
+- **Schema-validated.** Each request runs `validate_node` (type allow-list + property schema + enums) and, when `relation` is set, `validate_edge` (relation allow-list + endpoint-type compatibility) from `lucent_api/schema_registry.py` before the existing orphan / disambiguation guards.
+- Response envelope: `{"ok": true, ...write_result}` on success; on rejection `{"ok": false, "code": <error_code>, "detail": <reason>, ...}`. Error codes: `unknown_field`, `unknown_type`, `missing_target_type` (relation set without `target_type`), `unknown_edge`, `endpoint_mismatch`, `orphan_blocked`, `disambiguation_required` (with `similar_nodes`), `write_error`, `internal_error`. Schema rejections also carry `request_new_via: "POST /schema/request-new-type"` so the caller knows the escalation path.
+- **Full-replace** semantics on the `properties` JSON blob (`ON CONFLICT(mind_id, name) DO UPDATE SET properties = excluded.properties, ...`) — validation does not change this; anything not passed back is still wiped.
 - The `properties` field on the request body is a **string-encoded JSON**, not an object. The server `json.loads()` it.
-- The API flattens column values over inner-blob keys when reading. To preserve unrelated keys when round-tripping, **read the raw blob via direct sqlite** (not the API), augment, write back the full string.
+- The API flattens column values over inner-blob keys when reading. To preserve unrelated keys when round-tripping, prefer `POST /graph/properties/merge` (additive) or read the raw blob via direct sqlite, augment, write back the full string.
 - **Never smoke-test with `properties: "{}"` against an existing node** — empty blob wipes everything (soul_values included). Always pass the full existing blob plus your changes.
+- `POST /graph/upsert-backup` is the legacy un-validated handler from before the cutover, parked as a temporary fallback. It returns the old `{"upserted": bool, "reason": ...}` shape. Delete once stability is confirmed.
 
 ### Ollama / hive-tools
 
