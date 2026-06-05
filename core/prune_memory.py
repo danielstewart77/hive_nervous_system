@@ -51,7 +51,6 @@ LUCENT_DB = Path(
         "/data/lucent.db",
     )
 )
-MIND_ID = os.environ["MIND_ID"]
 REQUEST_TIMEOUT = 30
 
 # Per-class decay parameters (per the design).
