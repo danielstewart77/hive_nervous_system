@@ -362,7 +362,9 @@ async def wakeup_and_collect(
         await update_message_status(db, message_id, "dispatched", recipient_session_id=session_id)
 
         # 3. Send wakeup and collect response
-        prompt = build_wakeup_prompt(from_mind, to_mind, conversation_id, content, rolling_summary, message_number)
+        from_row = await get_mind_by_id(db, from_mind)
+        from_display = (from_row.get("name") if from_row else None) or from_mind
+        prompt = build_wakeup_prompt(from_display, to_mind, conversation_id, content, rolling_summary, message_number)
         response_text = await asyncio.wait_for(
             _collect_response(session_mgr.send_message(session_id, prompt)),
             timeout=backstop,
