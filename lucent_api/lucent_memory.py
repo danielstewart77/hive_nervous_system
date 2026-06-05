@@ -398,6 +398,7 @@ def memory_update(
     content: str = "",
     data_class: str = "",
     tags: str = "",
+    mind_id: str = "",
 ) -> str:
     """Update an existing memory.
 
@@ -406,6 +407,9 @@ def memory_update(
         content: New content to store. Re-embeds automatically.
         data_class: New data class to assign.
         tags: Comma-separated tags to replace existing tags.
+        mind_id: Reassign the memory to a different mind. Pass the canonical
+            UUID or the literal "shared" sentinel. Empty leaves the field
+            untouched.
 
     Returns:
         JSON with updated memory details or error.
@@ -438,6 +442,10 @@ def memory_update(
             set_parts.append("tags = ?")
             params.append(tags)
 
+        if mind_id:
+            set_parts.append("mind_id = ?")
+            params.append(mind_id)
+
         if not set_parts:
             return json.dumps({"updated": False, "error": "no fields provided to update"})
 
@@ -456,7 +464,7 @@ def memory_update(
 
         # Get updated row details
         row = conn.execute(
-            "SELECT data_class, SUBSTR(content, 1, 80) AS preview FROM memories WHERE id = ?",
+            "SELECT data_class, mind_id, SUBSTR(content, 1, 80) AS preview FROM memories WHERE id = ?",
             (int(memory_id),),
         ).fetchone()
 
@@ -464,6 +472,7 @@ def memory_update(
             "updated": True,
             "id": int(memory_id),
             "data_class": row["data_class"] if row else data_class,
+            "mind_id": row["mind_id"] if row else mind_id,
             "preview": row["preview"] if row else "",
         })
     except Exception as e:

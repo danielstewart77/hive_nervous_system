@@ -45,6 +45,7 @@ class UpdateBody(BaseModel):
     content: str = ""
     data_class: str = ""
     tags: str = ""
+    mind_id: str = ""
 
 
 # ---- Read endpoints ----
@@ -180,6 +181,7 @@ def memory_update(memory_id: str, body: UpdateBody) -> Any:
             content=body.content,
             data_class=body.data_class,
             tags=body.tags,
+            mind_id=body.mind_id,
         )
     )
 
