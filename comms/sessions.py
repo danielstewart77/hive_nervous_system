@@ -134,6 +134,17 @@ CREATE TABLE IF NOT EXISTS session_memory (
 
 CREATE INDEX IF NOT EXISTS idx_session_memory_lookup
     ON session_memory (mind_id, client_ref, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS session_turns (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    role        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
+    ON session_turns (session_id, created_at ASC);
 """
 
 
@@ -510,6 +521,12 @@ class SessionManager:
                 },
             )
 
+            await self._db.execute(
+                "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+                (session_id, content, time.time()),
+            )
+            await self._db.commit()
+
             # Route message to mind container via HTTP, stream SSE response
             proc_info = self._procs.get(session_id)
             if not proc_info or not proc_info.get("_mind_url"):
@@ -519,6 +536,7 @@ class SessionManager:
 
             import aiohttp
             retried = False
+            _assistant_buf: list[str] = []
             while True:
                 try:
                     async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
@@ -605,6 +623,15 @@ class SessionManager:
                                     continue
                                 yield event
 
+                                # Accumulate assistant text for turn storage
+                                if event.get("type") == "assistant":
+                                    msg = event.get("message") or {}
+                                    _content = msg.get("content") or event.get("content") or event.get("delta") or event.get("text") or ""
+                                    if isinstance(_content, list):
+                                        _content = "".join(c.get("text", "") for c in _content if isinstance(c, dict) and c.get("type") == "text")
+                                    if isinstance(_content, str) and _content:
+                                        _assistant_buf.append(_content)
+
                                 now = time.time()
                                 await self._db.execute(
                                     "UPDATE sessions SET last_active = ? WHERE id = ?",
@@ -617,6 +644,11 @@ class SessionManager:
                                         await self._db.execute(
                                             "UPDATE sessions SET claude_sid = ? WHERE id = ?",
                                             (claude_sid, session_id),
+                                        )
+                                    if _assistant_buf:
+                                        await self._db.execute(
+                                            "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                                            (session_id, "".join(_assistant_buf), now),
                                         )
                                     await self._db.commit()
                                     elapsed = time.monotonic() - t0
@@ -761,12 +793,17 @@ class SessionManager:
             raise ValueError(f"Session not found: {session_id}")
 
         await self._kill_process(session_id)
-        await self._db.execute(
-            "UPDATE sessions SET status = 'closed' WHERE id = ?", (session_id,)
-        )
-        await self._db.execute(
-            "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
-        )
+        if session.get("owner_type") == "scheduler":
+            await self._db.execute("DELETE FROM session_turns WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM active_sessions WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        else:
+            await self._db.execute(
+                "UPDATE sessions SET status = 'closed' WHERE id = ?", (session_id,)
+            )
+            await self._db.execute(
+                "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
+            )
         await self._db.commit()
         await self._publish_session_event(
             session_id,
@@ -1133,6 +1170,15 @@ class SessionManager:
         except Exception:
             log.exception("client_ref lookup failed for session=%s", session.get("id"))
         return {"owner_type": owner_type, "owner_ref": owner_ref, "client_ref": client_ref}
+
+    async def get_session_turns(self, session_id: str) -> list[dict]:
+        """Return stored turn history for a session from the session_turns table."""
+        cursor = await self._db.execute(
+            "SELECT role, content FROM session_turns WHERE session_id = ? ORDER BY created_at ASC",
+            (session_id,),
+        )
+        rows = await cursor.fetchall()
+        return [{"role": row["role"], "content": row["content"]} for row in rows]
 
     async def get_transcript_path(self, session_id: str) -> Path | None:
         """Get the path to a session's Claude transcript JSONL file.

@@ -289,6 +289,13 @@ async def stream_session_events(session_id: str):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@app.get("/sessions/{session_id}/history")
+async def get_session_history(session_id: str):
+    """Return the human/assistant turn history for a session from the session_turns table."""
+    messages = await session_mgr.get_session_turns(session_id)
+    return {"session_id": session_id, "messages": messages}
+
+
 # ---------------------------------------------------------------------------
 # Session management endpoints
 # ---------------------------------------------------------------------------
@@ -416,7 +423,7 @@ async def ws_stream(ws: WebSocket, session_id: str):
 # ---------------------------------------------------------------------------
 # Slash command routing (used by clients)
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new", "/remember"}
+SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/prune", "/status", "/sessions", "/switch", "/new", "/remember"}
 
 
 class CommandRequest(BaseModel):
@@ -518,6 +525,21 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
             else:
                 return {"error": f"Invalid session number: {target}"}
         return await session_mgr.kill_session(target)
+
+    if cmd == "/prune":
+        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        active_id = active["id"] if active else None
+        sessions = await session_mgr.list_sessions(owner_ref=body.owner_ref)
+        killed: list[str] = []
+        for s in sessions:
+            if s["id"] == active_id:
+                continue
+            try:
+                await session_mgr.kill_session(s["id"])
+                killed.append(s["id"])
+            except Exception:
+                pass
+        return {"killed": killed, "kept": active_id}
 
     if cmd == "/remember":
         return {
