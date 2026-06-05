@@ -56,18 +56,28 @@ def memory_list(
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
     tier: str | None = Query(None),
+    data_class: str | None = Query(None),
 ) -> Any:
     """List memories sequentially by creation time.
 
-    Optional ``tier`` and ``mind_id`` filters. ``mind_id`` is opt-in —
-    omit for cross-mind reads (default REQ-006 behavior), pass exactly
-    when you want a provenance filter (e.g. the bootstrap-loader's
-    per-mind + ``shared`` standing-rules union).
+    Optional ``tier``, ``mind_id``, and ``data_class`` filters. ``mind_id``
+    is opt-in — omit for cross-mind reads (default REQ-006 behavior),
+    pass exactly when you want a provenance filter (e.g. the
+    bootstrap-loader's per-mind + ``shared`` standing-rules union).
+    ``data_class`` is required for scoped cleanup sweeps; it was silently
+    ignored prior to 2026-05-25, which caused a full-table wipe via a
+    delete loop that trusted it as a filter.
     """
     from lucent_api.lucent_memory import memory_list as _memory_list
 
     return _decode(
-        _memory_list(offset=offset, limit=limit, mind_id=mind_id, tier=tier)
+        _memory_list(
+            offset=offset,
+            limit=limit,
+            mind_id=mind_id,
+            tier=tier,
+            data_class=data_class,
+        )
     )
 
 
@@ -94,6 +104,8 @@ def memory_retrieve(
     tag_filter: str | None = Query(None),
     data_class: str | None = Query(None),
     min_score: float | None = Query(None, ge=0.0, le=1.0),
+    mode: str = Query("vector"),
+    debug: bool = Query(True),
 ) -> Any:
     """Semantic search — return top-k memories most relevant to the query.
 
@@ -101,7 +113,24 @@ def memory_retrieve(
       mind_id    — provenance filter, opt-in (omit for cross-mind).
       data_class — keep only entries matching the given class.
       min_score  — drop entries below this cosine similarity (0.0–1.0).
+      mode       — ``vector`` (default, legacy cosine-only) or ``hybrid``
+                   (cosine + recency multiplier + BM25 via FTS5, returned
+                   in fixed buckets).
+      debug      — when ``mode=hybrid``, include per-row debug block with
+                   bucket label and component scores.
     """
+    if mode == "hybrid":
+        from lucent_api.lucent_memory import memory_retrieve_hybrid as _hybrid
+        return _decode(
+            _hybrid(
+                query=query,
+                k=k,
+                mind_id=mind_id,
+                min_score=min_score,
+                debug=debug,
+            )
+        )
+
     from lucent_api.lucent_memory import memory_retrieve as _memory_retrieve
 
     return _decode(

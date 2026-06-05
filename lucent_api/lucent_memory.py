@@ -283,6 +283,7 @@ def memory_list(
     limit: int = 25,
     mind_id: str | None = None,
     tier: str | None = None,
+    data_class: str | None = None,
 ) -> str:
     """List memories sequentially by creation time for review and cleanup.
 
@@ -299,6 +300,11 @@ def memory_list(
         tier: Optional filter — when set, only entries matching this tier
             are returned (and counted in total). Useful for the bootstrap
             loader's standing-tier subset.
+        data_class: Optional filter — when set, only entries whose
+            ``data_class`` matches exactly are returned. Required for
+            scoped cleanup sweeps (e.g. deleting every ``ephemeral`` row);
+            an earlier silent-ignore behaviour caused a full-table wipe
+            when callers passed this thinking it was honoured.
 
     Returns:
         JSON with entries, offset, limit, and total count.
@@ -313,6 +319,9 @@ def memory_list(
     if mind_id:
         where_parts.append("mind_id = ?")
         params.append(mind_id)
+    if data_class:
+        where_parts.append("data_class = ?")
+        params.append(data_class)
     where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
     try:
@@ -628,6 +637,274 @@ def query_decayed(limit: int = 20, mind_id: str | None = None) -> str:
         return json.dumps({"error": str(e)})
 
 
+HYBRID_RECENCY_HALF_LIFE_DAYS = 30
+HYBRID_RECENCY_FLOOR = 0.5
+HYBRID_VECTOR_POOL = 20
+HYBRID_BM25_POOL = 10
+HYBRID_DEFAULT_K = 5
+
+
+_FTS_STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "if", "of", "in", "on", "at",
+    "to", "for", "from", "by", "with", "as", "is", "are", "was", "were",
+    "be", "been", "being", "do", "does", "did", "have", "has", "had",
+    "this", "that", "these", "those", "it", "its", "i", "you", "we",
+    "they", "he", "she", "me", "my", "our", "your", "their", "them",
+    "us", "what", "when", "where", "why", "how", "who", "which",
+    "can", "could", "would", "should", "will", "shall", "may", "might",
+    "just", "really", "very", "so", "also", "too", "any", "some", "all",
+    "no", "not", "yes", "ok", "okay",
+}
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Strip FTS5 syntax characters and stopwords from a free-text query.
+
+    FTS5 treats characters like quotes, hyphens, parens, colons, and
+    asterisks as operators. We tokenize to alphanumerics, drop common
+    English stopwords, then OR-join the rest so any meaningful token
+    contributes to the BM25 ranking.
+    """
+    import re
+    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9_]+", query)]
+    tokens = [t for t in tokens if len(t) > 2 and t not in _FTS_STOPWORDS]
+    if not tokens:
+        return ""
+    return " OR ".join(tokens)
+
+
+def memory_retrieve_hybrid(
+    query: str,
+    k: int = HYBRID_DEFAULT_K,
+    mind_id: str | None = None,
+    min_score: float | None = None,
+    debug: bool = True,
+) -> str:
+    """Hybrid retrieval: vector + recency-weighted + BM25 keyword.
+
+    Builds candidate pool from top-N vector neighbours unioned with top-M
+    BM25 keyword matches. For each candidate computes three signals:
+    cosine similarity, recency multiplier (exp decay, half-life
+    ``HYBRID_RECENCY_HALF_LIFE_DAYS``, floor ``HYBRID_RECENCY_FLOOR``),
+    and normalized BM25.
+
+    Returns up to ``k`` rows in fixed buckets:
+        - slot 1..3: top by cosine * recency  (label ``recency``)
+        - slot 4:    top remaining by raw cosine  (label ``cosine``)
+        - slot 5:    top remaining by BM25  (label ``bm25``)
+
+    Empty slots are filled from a unified ranking. Each returned row
+    includes a ``debug`` dict with ``bucket`` and component scores when
+    ``debug=True``.
+    """
+    import math
+    import re
+
+    k = max(1, min(k, 20))
+    now = time.time()
+    half_life_seconds = HYBRID_RECENCY_HALF_LIFE_DAYS * 86400
+
+    try:
+        query_embedding = np.array(_embed(query), dtype=np.float32)
+        qnorm = float(np.linalg.norm(query_embedding))
+        if qnorm == 0:
+            return json.dumps({"memories": [], "count": 0, "mode": "hybrid", "error": "zero_query_embedding"})
+
+        conn = _get_conn()
+
+        # ---- Step 1: pull every row's embedding (mind_id-aware) and score cosine ----
+        where_parts: list[str] = []
+        params: list = []
+        if mind_id:
+            where_parts.append("mind_id = ?")
+            params.append(mind_id)
+        where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        rows = conn.execute(
+            f"""
+            SELECT id, content, embedding, tags, source, mind_id,
+                   created_at, data_class, tier, as_of, expires_at,
+                   superseded, codebase_ref
+            FROM memories
+            {where_clause}
+            """,
+            params,
+        ).fetchall()
+        if not rows:
+            return json.dumps({"memories": [], "count": 0, "mode": "hybrid"})
+
+        by_id: dict[int, dict] = {}
+        cosine_scores: dict[int, float] = {}
+        for row in rows:
+            emb = _decode_embedding(row["embedding"])
+            if emb is None:
+                continue
+            enorm = float(np.linalg.norm(emb))
+            score = 0.0 if enorm == 0 else float(np.dot(query_embedding, emb) / (qnorm * enorm))
+            rid = int(row["id"])
+            cosine_scores[rid] = score
+            by_id[rid] = {
+                "id": rid,
+                "content": row["content"],
+                "tags": row["tags"],
+                "source": row["source"],
+                "mind_id": row["mind_id"],
+                "created_at": row["created_at"],
+                "data_class": row["data_class"],
+                "tier": row["tier"],
+                "as_of": row["as_of"],
+                "expires_at": row["expires_at"],
+                "superseded": bool(row["superseded"]) if row["superseded"] is not None else None,
+                "codebase_ref": row["codebase_ref"],
+            }
+
+        # ---- Step 2: BM25 over FTS5 ----
+        bm25_scores: dict[int, float] = {}
+        fts_q = _sanitize_fts_query(query)
+        if fts_q:
+            try:
+                fts_rows = conn.execute(
+                    f"""
+                    SELECT memories_fts.rowid AS rid, bm25(memories_fts) AS bm
+                    FROM memories_fts
+                    WHERE memories_fts MATCH ?
+                    ORDER BY bm
+                    LIMIT ?
+                    """,
+                    (fts_q, HYBRID_BM25_POOL * 4),
+                ).fetchall()
+                # bm25() returns negative; smaller (more negative) is better.
+                # Normalize to a positive comparable score (higher is better).
+                for r in fts_rows:
+                    rid = int(r["rid"])
+                    if rid in by_id:
+                        bm25_scores[rid] = -float(r["bm"])
+            except Exception:
+                logger.exception("hybrid: bm25 lookup failed; continuing with vector-only")
+
+        # ---- Step 3: candidate pool = top HYBRID_VECTOR_POOL by cosine UNION top HYBRID_BM25_POOL by bm25 ----
+        top_cosine_ids = [rid for rid, _ in sorted(cosine_scores.items(), key=lambda kv: kv[1], reverse=True)[:HYBRID_VECTOR_POOL]]
+        top_bm25_ids = [rid for rid, _ in sorted(bm25_scores.items(), key=lambda kv: kv[1], reverse=True)[:HYBRID_BM25_POOL]]
+        pool_ids = list(dict.fromkeys(top_cosine_ids + top_bm25_ids))
+
+        # ---- Step 4: per-candidate combined scoring ----
+        def recency_mult(created_at) -> float:
+            try:
+                age = max(0.0, now - float(created_at or 0))
+            except (TypeError, ValueError):
+                return HYBRID_RECENCY_FLOOR
+            raw = math.exp(-age / half_life_seconds)
+            return max(HYBRID_RECENCY_FLOOR, raw)
+
+        scored = []
+        for rid in pool_ids:
+            row = by_id[rid]
+            cos = cosine_scores.get(rid, 0.0)
+            rec = recency_mult(row.get("created_at"))
+            bm = bm25_scores.get(rid, 0.0)
+            if min_score is not None and cos < min_score and bm <= 0:
+                # Skip dual-failure rows; allow BM25-positive rows through even at low cosine.
+                continue
+            scored.append({
+                "rid": rid,
+                "cos": cos,
+                "rec": rec,
+                "bm": bm,
+                "row": row,
+            })
+
+        if not scored:
+            return json.dumps({"memories": [], "count": 0, "mode": "hybrid"})
+
+        # ---- Step 5: bucket allocation ----
+        rec_slots = max(0, min(3, k - 2)) if k >= 5 else min(k, 3)
+        cos_slots = 1 if k >= 4 else 0
+        bm_slots = 1 if k >= 5 else 0
+        # Ensure totals don't exceed k
+        rec_slots = min(rec_slots, k)
+        cos_slots = min(cos_slots, k - rec_slots)
+        bm_slots = min(bm_slots, k - rec_slots - cos_slots)
+
+        used: set[int] = set()
+        picks: list[tuple[str, dict]] = []  # (bucket, scored_entry)
+
+        # recency bucket
+        rec_ranked = sorted(scored, key=lambda s: (s["cos"] * s["rec"]), reverse=True)
+        for s in rec_ranked:
+            if len(picks) >= rec_slots:
+                break
+            if s["rid"] in used:
+                continue
+            used.add(s["rid"])
+            picks.append(("recency", s))
+
+        # cosine bucket
+        cos_ranked = sorted(scored, key=lambda s: s["cos"], reverse=True)
+        cos_added = 0
+        for s in cos_ranked:
+            if cos_added >= cos_slots:
+                break
+            if s["rid"] in used:
+                continue
+            used.add(s["rid"])
+            picks.append(("cosine", s))
+            cos_added += 1
+
+        # bm25 bucket
+        bm_ranked = sorted(scored, key=lambda s: s["bm"], reverse=True)
+        bm_added = 0
+        for s in bm_ranked:
+            if bm_added >= bm_slots:
+                break
+            if s["bm"] <= 0:
+                break
+            if s["rid"] in used:
+                continue
+            used.add(s["rid"])
+            picks.append(("bm25", s))
+            bm_added += 1
+
+        # Backfill any leftover capacity from combined ranking
+        if len(picks) < k:
+            combined = sorted(
+                scored,
+                key=lambda s: (s["cos"] * s["rec"]) + (0.05 * s["bm"]),
+                reverse=True,
+            )
+            for s in combined:
+                if len(picks) >= k:
+                    break
+                if s["rid"] in used:
+                    continue
+                used.add(s["rid"])
+                picks.append(("fill", s))
+
+        # ---- Step 6: shape response ----
+        out = []
+        for bucket, s in picks:
+            row = dict(s["row"])
+            if debug:
+                row["debug"] = {
+                    "bucket": bucket,
+                    "cosine": round(s["cos"], 4),
+                    "recency_mult": round(s["rec"], 4),
+                    "combined": round(s["cos"] * s["rec"], 4),
+                    "bm25": round(s["bm"], 4),
+                }
+            row["score"] = round(s["cos"], 4)
+            out.append(row)
+
+        return json.dumps({
+            "memories": out,
+            "count": len(out),
+            "mode": "hybrid",
+            "pool_size": len(pool_ids),
+        })
+    except Exception as e:
+        logger.exception("memory_retrieve_hybrid failed")
+        return json.dumps({"error": str(e), "mode": "hybrid"})
+
+
 # All memory tool functions for registration
 MEMORY_TOOLS = [
     memory_store,
@@ -636,5 +913,6 @@ MEMORY_TOOLS = [
     memory_delete,
     memory_update,
     memory_retrieve,
+    memory_retrieve_hybrid,
     query_decayed,
 ]
