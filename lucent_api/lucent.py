@@ -5,15 +5,22 @@ and vector memory storage. Provides connection management and schema
 initialization used by lucent_graph.py and lucent_memory.py.
 
 Schema: nodes, edges, memories tables with indexes on frequently queried columns.
-Connection: lazy singleton with WAL mode and check_same_thread=False.
+Connection: per-thread, lazy, with WAL mode. Each thread gets its own
+connection so concurrent reads and writes don't share cursor state — a
+shared sqlite3.Connection with check_same_thread=False is documented as
+"safe" only when callers serialize access themselves, and uvicorn's
+threadpool does not.
 """
 
 import os
 import sqlite3
+import threading
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "lucent.db")
 
-_conn: sqlite3.Connection | None = None
+_thread_local = threading.local()
+_schema_init_lock = threading.Lock()
+_schema_initialized = False
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -103,11 +110,23 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def _get_connection() -> sqlite3.Connection:
-    """Return the lazy-singleton SQLite connection, initializing schema on first call."""
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.row_factory = sqlite3.Row
-        _init_schema(_conn)
-    return _conn
+    """Return a per-thread SQLite connection, initializing schema on first call.
+
+    Each worker thread gets its own connection. WAL mode lets concurrent
+    readers and a single writer coexist at the SQLite layer. Schema
+    initialization runs exactly once across the whole process, guarded
+    by a lock so the first two threads can't race the CREATE TABLE
+    statements.
+    """
+    global _schema_initialized
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.row_factory = sqlite3.Row
+        with _schema_init_lock:
+            if not _schema_initialized:
+                _init_schema(conn)
+                _schema_initialized = True
+        _thread_local.conn = conn
+    return conn

@@ -28,10 +28,11 @@ class MemoryListDataClassFilterTests(unittest.TestCase):
         self._lucent_mod = lucent_mod
         self._mem_mod = mem_mod
         self._orig_db_path = lucent_mod.DB_PATH
-        self._orig_conn = lucent_mod._conn
 
         lucent_mod.DB_PATH = self.db_path
-        lucent_mod._conn = None
+        # Reset per-thread connection state so the test gets a fresh DB.
+        lucent_mod._thread_local = type(lucent_mod._thread_local)()
+        lucent_mod._schema_initialized = False
 
         conn = lucent_mod._get_connection()
         # Seed three rows across three data classes.
@@ -54,10 +55,13 @@ class MemoryListDataClassFilterTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         try:
-            if self._lucent_mod._conn is not None:
-                self._lucent_mod._conn.close()
+            conn = getattr(self._lucent_mod._thread_local, "conn", None)
+            if conn is not None:
+                conn.close()
         finally:
-            self._lucent_mod._conn = self._orig_conn
+            # Reset module state so the next test starts clean.
+            self._lucent_mod._thread_local = type(self._lucent_mod._thread_local)()
+            self._lucent_mod._schema_initialized = False
             self._lucent_mod.DB_PATH = self._orig_db_path
             self.tmp_dir.cleanup()
 
