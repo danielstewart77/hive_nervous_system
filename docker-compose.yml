@@ -15,6 +15,7 @@ services:
       - "0.0.0.0:8425:8424"
     environment:
       LUCENT_API_PORT: "8424"
+      LUCENT_URL_SELF: "http://127.0.0.1:8424"
       LUCENT_DB_PATH: "/data/lucent.db"
       PRUNE_LOG_PATH: "/data/prune.log"
       PRUNE_CRON: "0 4 * * *"

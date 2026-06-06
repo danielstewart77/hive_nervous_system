@@ -40,7 +40,7 @@ import requests
 
 log = logging.getLogger(__name__)
 
-LUCENT_URL = os.environ.get("LUCENT_URL_SELF", "http://127.0.0.1:8434")
+LUCENT_URL = os.environ.get("LUCENT_URL_SELF", "http://127.0.0.1:8424")
 LUCENT_BEARER = os.environ.get("LUCENT_BEARER_TOKEN", "")
 _AUTH_HEADERS = {"Authorization": f"Bearer {LUCENT_BEARER}"} if LUCENT_BEARER else {}
 HIVE_TOOLS_URL = os.environ.get("HIVE_TOOLS_URL", "http://127.0.0.1:9421")
