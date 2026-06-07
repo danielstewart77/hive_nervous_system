@@ -42,7 +42,7 @@ async def _run_prune() -> None:
     log.info("prune-memory: starting")
     try:
         from core.prune_memory import run_all
-        runs = run_all()
+        runs = await asyncio.to_thread(run_all)
     except Exception:
         log.exception("prune-memory: run_all() crashed")
         return
