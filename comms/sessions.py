@@ -1180,6 +1180,45 @@ class SessionManager:
         rows = await cursor.fetchall()
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
+    async def get_late_turns(
+        self, client_type: str, client_ref: str, since: float
+    ) -> dict:
+        """Return the active session's turns committed after a watermark.
+
+        The session-rotation Stop hook records a ``rotation_started_at``
+        watermark when it begins its multi-minute Ollama work. Any user
+        turn accepted during that window is written to ``session_turns``
+        immediately (in ``send_message``) but is invisible to the
+        transcript-tail reread if the assistant reply never completed
+        before ``/clear``. This is the durable merge source of truth the
+        hook queries before clearing: every turn with
+        ``created_at > since`` for the surface's currently-active session.
+
+        ``client_type`` is the session's ``owner_type`` (the
+        ``active_sessions`` table keys on it). Returns
+        ``{"session_id": <id|None>, "turns": [{role, content, created_at}]}``;
+        an empty turn list when there is no active session.
+        """
+        active = await self.get_active_session(client_type, client_ref)
+        if not active:
+            return {"session_id": None, "turns": []}
+        session_id = active["id"]
+        cursor = await self._db.execute(
+            """SELECT role, content, created_at
+                 FROM session_turns
+                WHERE session_id = ? AND created_at > ?
+                ORDER BY created_at ASC""",
+            (session_id, since),
+        )
+        rows = await cursor.fetchall()
+        return {
+            "session_id": session_id,
+            "turns": [
+                {"role": r["role"], "content": r["content"], "created_at": r["created_at"]}
+                for r in rows
+            ],
+        }
+
     async def get_transcript_path(self, session_id: str) -> Path | None:
         """Get the path to a session's Claude transcript JSONL file.
 

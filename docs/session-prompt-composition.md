@@ -81,6 +81,16 @@ composer reads the most recent row for the pair and wraps its
 `carry_forward` field as `<session-memory>…</session-memory>`. Pre-B10
 rows without the `carry_forward` field fall back to the raw body.
 
+If the envelope carries a non-empty `continuation` list — user turns
+accepted after rotation began whose assistant reply never completed
+before `/clear` — the composer renders them in a distinct
+`<pending-continuation>` block appended after `<session-memory>`. This
+is the late-turn handoff: the watermarked merge from comms's durable
+`session_turns` ledger (via `GET /sessions/late-turns`, queried by the
+rotation Stop hook) ensures input sent during a rotation is answered by
+the next session rather than lost. The continuation is single-source —
+rendered only here, never duplicated into `carry_forward`.
+
 A first session for a `(mind_id, client_ref)` pair produces no
 session-memory block; the layer is empty until the first rotation
 writes the first carry-forward row.
