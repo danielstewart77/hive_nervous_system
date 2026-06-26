@@ -125,16 +125,54 @@ async def _fetch_session_memory(
     # ``carry_forward`` text field (prose summary + recent dialogue +
     # continuation cue). Prefer that field; fall back to the raw JSON for
     # legacy rows (pre-B10 rotations) that don't have it.
+    #
+    # Late-turn handoff: the envelope may also carry a ``continuation``
+    # list — user turns accepted after rotation began whose assistant
+    # reply never completed before ``/clear``. Those are surfaced in a
+    # distinct ``<pending-continuation>`` block (single source: rendered
+    # only here, never duplicated into ``carry_forward``) so the new
+    # session knows to answer them as the user's latest input.
     try:
         import json
         envelope = json.loads(raw_body)
         if isinstance(envelope, dict):
             text = envelope.get("carry_forward")
             if isinstance(text, str) and text.strip():
-                return f"<session-memory>\n{text.strip()}\n</session-memory>"
+                blocks = [f"<session-memory>\n{text.strip()}\n</session-memory>"]
+                cont_block = _render_pending_continuation(envelope.get("continuation"))
+                if cont_block:
+                    blocks.append(cont_block)
+                return "\n\n".join(blocks)
     except (ValueError, TypeError):
         pass
     return f"<session-memory>\n{raw_body}\n</session-memory>"
+
+
+def _render_pending_continuation(continuation: Any) -> str:
+    """Render unanswered late user turns as a ``<pending-continuation>`` block.
+
+    Returns "" when there is nothing pending. Each entry is a turn dict
+    with a ``content`` (or legacy ``text``) field; non-user / empty
+    entries are skipped.
+    """
+    if not isinstance(continuation, list) or not continuation:
+        return ""
+    items: list[str] = []
+    for turn in continuation:
+        if not isinstance(turn, dict):
+            continue
+        if turn.get("role") and turn.get("role") != "user":
+            continue
+        content = (turn.get("content") or turn.get("text") or "").strip()
+        if content:
+            items.append(f"- {content}")
+    if not items:
+        return ""
+    header = (
+        "Input received during the rotation that was not yet answered. "
+        "Respond to it as the user's latest message."
+    )
+    return "\n".join(["<pending-continuation>", header, *items, "</pending-continuation>"])
 
 
 async def compose_prompt_blocks(

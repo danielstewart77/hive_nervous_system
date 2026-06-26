@@ -245,6 +245,18 @@ async def list_sessions(
     )
 
 
+@app.get("/sessions/late-turns")
+async def late_turns(client_type: str, client_ref: str, since: float):
+    """Return the active session's turns committed after a watermark.
+
+    The rotation Stop hook calls this just before ``/clear`` to merge any
+    turn that landed during its Ollama window — the durable late-turn
+    handoff source of truth, independent of transcript timing. Declared
+    before ``/sessions/{session_id}`` so the literal path wins the match.
+    """
+    return await session_mgr.get_late_turns(client_type, client_ref, since)
+
+
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
     session = await session_mgr.get_session(session_id)
