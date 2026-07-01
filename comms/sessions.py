@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_active   REAL NOT NULL,
     status        TEXT NOT NULL DEFAULT 'running',
     mind_id       TEXT DEFAULT 'ada',
-    group_session_id TEXT
+    group_session_id TEXT,
+    rotation_armed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -197,6 +198,17 @@ class SessionManager:
         try:
             await self._db.execute(
                 "ALTER TABLE sessions ADD COLUMN group_session_id TEXT"
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
+        # Migration: add rotation_armed column for existing databases. When
+        # set, the next user turn finalizes a pending session rotation (swap
+        # to a fresh session) instead of the rotation Stop hook clearing the
+        # session on the assistant's turn. See arm_rotation / send_message.
+        try:
+            await self._db.execute(
+                "ALTER TABLE sessions ADD COLUMN rotation_armed INTEGER NOT NULL DEFAULT 0"
             )
             await self._db.commit()
         except Exception:
@@ -361,6 +373,78 @@ class SessionManager:
             return None
         return await self._session_dict(result["session_id"])
 
+    # ------------------------------------------------------------------
+    # Rotation arming (finalize-on-user-turn)
+    # ------------------------------------------------------------------
+    async def arm_rotation(self, client_type: str, client_ref: str) -> dict:
+        """Mark the active session for (client_type, client_ref) as pending
+        rotation.
+
+        Called by the per-mind ``rotation_check`` Stop hook once it has
+        written the carry-forward, INSTEAD of clearing the session inline.
+        The Stop hook fires on an assistant turn, so clearing there can kill
+        the old session mid-reply to a message that arrived during the
+        rotation window. Arming defers the actual swap to ``send_message``,
+        which finalizes it on the next user turn — the rollover always lands
+        on the user's turn and never destroys an assistant turn.
+        """
+        active = await self.get_active_session(client_type, client_ref)
+        if not active:
+            return {"ok": False, "error": "no active session"}
+        await self._db.execute(
+            "UPDATE sessions SET rotation_armed = 1 WHERE id = ?", (active["id"],)
+        )
+        await self._db.commit()
+        log.info(
+            "armed rotation: session=%s client=%s/%s", active["id"], client_type, client_ref
+        )
+        return {"ok": True, "session_id": active["id"]}
+
+    async def _finalize_armed_rotation(self, session: dict) -> str | None:
+        """Consume a session's armed flag by swapping to a fresh session.
+
+        Kills the armed session (quiescent — its assistant turn already
+        Stopped, which is what armed it) and creates its replacement, which
+        boots with the carry-forward via ``create_session`` →
+        ``bootstrap_loader``. Returns the new session id, or ``None`` when the
+        swap can't proceed (no ``client_ref`` to rebind the surface) — in
+        which case the caller falls through and delivers on the old session.
+        """
+        routing = await self._routing_for(session)
+        client_ref = routing["client_ref"]
+        old_id = session["id"]
+        if not client_ref:
+            # Without client_ref we can't rebind a new active session to the
+            # surface. Disarm and let the caller deliver normally rather than
+            # strand the conversation.
+            await self._db.execute(
+                "UPDATE sessions SET rotation_armed = 0 WHERE id = ?", (old_id,)
+            )
+            await self._db.commit()
+            log.warning(
+                "armed rotation: no client_ref for session=%s; disarming, delivering on old session",
+                old_id,
+            )
+            return None
+        log.info("armed rotation: finalizing on user turn, retiring session=%s", old_id)
+        await self.kill_session(old_id)
+        new = await self.create_session(
+            owner_type=routing["owner_type"],
+            owner_ref=routing["owner_ref"],
+            client_ref=client_ref,
+            mind_id=session["mind_id"],
+        )
+        return new["id"]
+
+    async def _forward_to_session(self, session_id: str, content: str, images: list[dict] | None):
+        """Re-dispatch a turn to another session, yielding its events.
+
+        A thin seam over ``send_message`` so the armed-rotation redirect in
+        ``send_message`` is a single call (and independently testable).
+        """
+        async for event in self.send_message(session_id, content, images=images):
+            yield event
+
     async def stream_session_events(self, session_id: str):
         """Yield live session events to passive observers."""
         session = await self._get_row(session_id)
@@ -451,6 +535,20 @@ class SessionManager:
             if session.get("status") == "closed":
                 log.info("send_message: refusing closed session=%s — caller must pick up new active session", session_id)
                 raise ValueError(f"Session {session_id} is closed")
+
+            # Pending rotation finalizes HERE, on the user's turn. The Stop
+            # hook armed this session after writing the carry-forward; swap to
+            # a fresh session now and dispatch this turn to it, so the user's
+            # message is the new session's first turn. Never fires for
+            # un-armed sessions, so normal delivery is unchanged.
+            if session.get("rotation_armed"):
+                new_id = await self._finalize_armed_rotation(session)
+                if new_id and new_id != session_id:
+                    async for event in self._forward_to_session(new_id, content, images):
+                        yield event
+                    return
+                # new_id is None → disarmed (no client_ref); fall through and
+                # deliver on this session as usual.
 
             mind_id = session["mind_id"]
             log.info("send_message: start session=%s mind=%s", session_id, mind_id)

@@ -257,6 +257,23 @@ async def late_turns(client_type: str, client_ref: str, since: float):
     return await session_mgr.get_late_turns(client_type, client_ref, since)
 
 
+class ArmRotationRequest(BaseModel):
+    client_type: str
+    client_ref: str
+
+
+@app.post("/sessions/arm-rotation")
+async def arm_rotation(body: ArmRotationRequest):
+    """Arm the active session for pending rotation (finalize-on-user-turn).
+
+    Called by the ``rotation_check`` Stop hook after it writes the
+    carry-forward, in place of an inline ``/clear``. The actual session swap
+    happens on the next user turn in ``send_message``. Declared before
+    ``/sessions/{session_id}`` so the literal path wins the match.
+    """
+    return await session_mgr.arm_rotation(body.client_type, body.client_ref)
+
+
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
     session = await session_mgr.get_session(session_id)
