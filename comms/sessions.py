@@ -153,6 +153,12 @@ class SessionManager:
     # Idle interval after which the observer event stream emits a ping.
     # Must stay under intermediary idle timeouts (Cloudflare ~100s).
     EVENT_HEARTBEAT_SECONDS = 20.0
+    # Sessions idle longer than this are reaped to 'closed'. Nothing else
+    # ever closes an abandoned session — rotation and explicit kills close
+    # their own, but a session whose surface simply walked away stays
+    # 'idle' forever and reads as active everywhere downstream.
+    REAP_IDLE_AFTER_SECONDS = 7 * 86400
+    REAP_INTERVAL_SECONDS = 3600.0
 
     def __init__(self, model_registry: ModelRegistry):
         self._registry = model_registry
@@ -162,6 +168,7 @@ class SessionManager:
         self._rc_procs: dict[str, asyncio.subprocess.Process] = {}  # RC subprocesses
         self._locks: dict[str, asyncio.Lock] = {}
         self._observer_queues: dict[str, set[asyncio.Queue]] = {}
+        self._reaper_task: asyncio.Task | None = None
         self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
 
     # ------------------------------------------------------------------
@@ -222,10 +229,14 @@ class SessionManager:
             "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
         )
         await self._db.commit()
+        self._reaper_task = asyncio.create_task(self._reap_loop())
         log.info("Session manager started (db=%s)", db_path)
 
     async def shutdown(self):
         """Kill all subprocesses and close DB."""
+        if self._reaper_task:
+            self._reaper_task.cancel()
+            self._reaper_task = None
         # Kill RC subprocesses that may not have a corresponding main process
         for sid in list(self._rc_procs):
             await self.kill_rc_process(sid)
@@ -234,6 +245,47 @@ class SessionManager:
         if self._db:
             await self._db.close()
         log.info("Session manager shut down")
+
+    async def _reap_loop(self):
+        """Periodically sweep abandoned sessions to 'closed'.
+
+        First sweep runs immediately so a restart clears any backlog of
+        ghosts without waiting an interval.
+        """
+        while True:
+            try:
+                await self.reap_stale_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Session reaper sweep failed")
+            await asyncio.sleep(self.REAP_INTERVAL_SECONDS)
+
+    async def reap_stale_sessions(self) -> list[str]:
+        """Close idle sessions untouched for REAP_IDLE_AFTER_SECONDS.
+
+        A session with a live tracked subprocess is skipped no matter how
+        old its last_active is — liveness beats the timestamp. Rows are
+        closed, not deleted: 'closed' is what Archived means downstream.
+        """
+        cutoff = time.time() - self.REAP_IDLE_AFTER_SECONDS
+        rows = await self._db.execute_fetchall(
+            "SELECT id FROM sessions WHERE status = 'idle' AND last_active < ?",
+            (cutoff,),
+        )
+        stale = [r["id"] for r in rows if r["id"] not in self._procs]
+        for session_id in stale:
+            await self._db.execute(
+                "UPDATE sessions SET status = 'closed' WHERE id = ?", (session_id,)
+            )
+            await self._db.execute(
+                "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
+            )
+        if stale:
+            await self._db.commit()
+            log.info("Reaped %d stale idle session(s): %s", len(stale),
+                     ", ".join(s[:8] for s in stale))
+        return stale
 
     # ------------------------------------------------------------------
     # Session CRUD
