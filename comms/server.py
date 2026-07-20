@@ -110,8 +110,26 @@ app = FastAPI(
     title="Hive Mind Gateway",
     version="1.0.0",
     lifespan=lifespan,
-    dependencies=[Depends(require_bearer)],
 )
+
+
+@app.middleware("http")
+async def _bearer_gate(request: Request, call_next):
+    """HTTP-only bearer gate, equivalent to the old app-level `Depends(require_bearer)`.
+
+    A `Request`-typed FastAPI dependency can't be applied globally on this
+    app: FastAPI tries to run it for the WebSocket routes too, and a
+    WebSocket connection has no `Request` to build, so dependency
+    resolution throws before the handler ever runs. `@app.middleware("http")`
+    only wraps the HTTP scope — WebSocket connections bypass it entirely —
+    so the two `/sessions/{id}/stream` and `/sessions/{id}/attach` routes
+    keep doing their own manual bearer check, same as they always have.
+    """
+    try:
+        require_bearer(request, request.headers.get("authorization", ""))
+    except HTTPException as exc:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -447,6 +465,88 @@ async def ws_stream(ws: WebSocket, session_id: str):
                 await ws.send_json(event)
     except WebSocketDisconnect:
         pass
+
+
+async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> None:
+    """Bridge raw bytes between the browser's WS and the mind's pty-attach WS.
+
+    Whichever side closes first ends the bridge — a live pty and a browser
+    tab have no independent life of their own once either end is gone.
+    """
+    async def browser_to_mind() -> None:
+        while True:
+            msg = await browser_ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                return
+            data = msg.get("bytes")
+            if data is None and msg.get("text") is not None:
+                data = msg["text"].encode()
+            if data:
+                await mind_ws.send_bytes(data)
+
+    async def mind_to_browser() -> None:
+        async for msg in mind_ws:
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                await browser_ws.send_bytes(msg.data)
+            elif msg.type == aiohttp.WSMsgType.TEXT:
+                await browser_ws.send_bytes(msg.data.encode())
+            else:  # CLOSE, CLOSED, ERROR
+                return
+
+    tasks = [asyncio.ensure_future(browser_to_mind()), asyncio.ensure_future(mind_to_browser())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+
+
+@app.websocket("/sessions/{session_id}/attach")
+async def ws_attach(ws: WebSocket, session_id: str):
+    """Reverse-proxy a browser terminal WS into the owning mind's pty attach.
+
+    Resolves the session's mind via the DB (not the in-memory `_procs` cache,
+    which is empty after a restart even though the session and its container
+    are both still alive) so a fresh hive-comms process can still route an
+    attach. Session-lifecycle knowledge (claude_sid, model) stays here;
+    the mind's attach-pty route stays stateless per-request.
+    """
+    expected = os.environ.get("COMMS_BEARER_TOKEN", "")
+    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
+    if expected:
+        auth = ws.headers.get("authorization", "")
+        token = auth[7:] if auth.startswith("Bearer ") else ""
+        if token != expected and (not admin or token != admin):
+            await ws.close(code=4401)
+            return
+
+    session = await session_mgr.get_session(session_id)
+    if not session:
+        await ws.close(code=4404, reason=f"session {session_id} not found")
+        return
+    try:
+        mind_row = await session_mgr._get_mind_row(session["mind_id"])
+    except ValueError as exc:
+        await ws.close(code=4404, reason=str(exc))
+        return
+
+    mind_ws_url = mind_row["gateway_url"].replace("http://", "ws://").replace("https://", "wss://")
+    params = urlencode({
+        "resume_sid": session.get("claude_sid") or "",
+        "model": session.get("model") or "sonnet",
+    })
+    attach_url = f"{mind_ws_url}/sessions/{session_id}/attach-pty?{params}"
+
+    await ws.accept()
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.ws_connect(attach_url) as mind_ws:
+                await _pump_attach_ws(ws, mind_ws)
+    except aiohttp.ClientError as exc:
+        log.warning("attach-pty proxy to %s failed: %s", attach_url, exc)
+        await ws.close(code=1011, reason="mind unreachable")
 
 
 # ---------------------------------------------------------------------------
