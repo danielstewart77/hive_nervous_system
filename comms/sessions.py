@@ -150,6 +150,10 @@ CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
 
 
 class SessionManager:
+    # Idle interval after which the observer event stream emits a ping.
+    # Must stay under intermediary idle timeouts (Cloudflare ~100s).
+    EVENT_HEARTBEAT_SECONDS = 20.0
+
     def __init__(self, model_registry: ModelRegistry):
         self._registry = model_registry
         self._db: aiosqlite.Connection | None = None
@@ -446,7 +450,14 @@ class SessionManager:
             yield event
 
     async def stream_session_events(self, session_id: str):
-        """Yield live session events to passive observers."""
+        """Yield live session events to passive observers.
+
+        Emits a ping event whenever the stream has been idle for
+        EVENT_HEARTBEAT_SECONDS — sessions can sit silent for minutes
+        between turns, and proxies in front of web surfaces (Cloudflare
+        idles out around 100s) sever quiet connections, dropping every
+        event published before the observer reconnects.
+        """
         session = await self._get_row(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
@@ -460,7 +471,13 @@ class SessionManager:
 
         try:
             while True:
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(), timeout=self.EVENT_HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    yield {"type": "ping", "session_id": session_id}
+                    continue
                 yield event
                 if event.get("type") == "session_closed":
                     return
