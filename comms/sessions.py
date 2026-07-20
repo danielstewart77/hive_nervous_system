@@ -677,6 +677,36 @@ class SessionManager:
                                     continue
                                 raise ValueError(f"Session {session_id} not found after respawn")
 
+                            if resp.status != 200:
+                                # Any other error from the mind: surface the
+                                # real failure instead of silently ending the
+                                # stream (the SSE line-reader below would find
+                                # no `data:` lines in a JSON error body and
+                                # yield nothing, so the surface shows a
+                                # useless generic error).
+                                body_text = await resp.text()
+                                try:
+                                    detail = json.loads(body_text).get("error", body_text)
+                                except (json.JSONDecodeError, AttributeError):
+                                    detail = body_text
+                                detail = detail or f"HTTP {resp.status}"
+                                log.error(
+                                    "Mind %s returned HTTP %s for session %s: %s",
+                                    mind_id, resp.status, session_id, detail,
+                                )
+                                err_event = {
+                                    "type": "result",
+                                    "subtype": "error",
+                                    "is_error": True,
+                                    "result": (
+                                        f"ERROR from mind '{mind_id}' "
+                                        f"(HTTP {resp.status}): {detail}"
+                                    ),
+                                }
+                                await self._publish_session_event(session_id, err_event)
+                                yield err_event
+                                return
+
                             async for line in resp.content:
                                 line = line.decode().strip()
                                 if not line or not line.startswith("data: "):
