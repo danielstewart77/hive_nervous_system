@@ -15,7 +15,6 @@ import signal
 import time
 import types
 import uuid
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -164,10 +163,6 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._observer_queues: dict[str, set[asyncio.Queue]] = {}
         self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
-        # Hive Glass observability: ring of recent turn-hop events plus live
-        # fan-out queues for the /glass/stream SSE feed.
-        self._glass_ring: deque[dict] = deque(maxlen=200)
-        self._glass_queues: set[asyncio.Queue] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -507,56 +502,6 @@ class SessionManager:
             except asyncio.QueueFull:
                 continue
 
-    # ------------------------------------------------------------------
-    # Hive Glass observability
-    # ------------------------------------------------------------------
-    def glass_emit(self, hop: str, session_id: str, mind_id: str | None = None, **extra: Any) -> None:
-        """Record a turn-hop event and fan it out to /glass/stream watchers.
-
-        Hops: received, dispatched, first_output, replied, error, respawn.
-        The ring is memory-only — the panel is a live debugging aid, not an
-        audit log.
-        """
-        event = {
-            "hop": hop,
-            "session_id": session_id,
-            "mind_id": mind_id or self._mind_ids.get(session_id),
-            "ts": time.time(),
-            **extra,
-        }
-        self._glass_ring.append(event)
-        for queue in list(self._glass_queues):
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                continue
-
-    def glass_snapshot(self) -> list[dict]:
-        """Recent turn-hop events, oldest first."""
-        return list(self._glass_ring)
-
-    async def glass_stream(self):
-        """Yield live turn-hop events across all sessions, with heartbeat."""
-        queue: asyncio.Queue = asyncio.Queue(maxsize=500)
-        self._glass_queues.add(queue)
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(
-                        queue.get(), timeout=self.EVENT_HEARTBEAT_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    yield {"hop": "ping", "ts": time.time()}
-                    continue
-                yield event
-        finally:
-            self._glass_queues.discard(queue)
-
     async def activate_session(
         self, session_id: str, client_type: str, client_ref: str
     ) -> dict:
@@ -625,7 +570,6 @@ class SessionManager:
             mind_id = session["mind_id"]
             log.info("send_message: start session=%s mind=%s", session_id, mind_id)
             t0 = time.monotonic()
-            self.glass_emit("received", session_id, mind_id, preview=content[:80])
 
             # Respawn if needed
             needs_respawn = session_id not in self._procs
@@ -704,12 +648,10 @@ class SessionManager:
                 raise ValueError(f"No mind container URL for session {session_id}")
 
             mind_url = proc_info["_mind_url"]
-            self.glass_emit("dispatched", session_id, mind_id, mind_url=mind_url)
 
             import aiohttp
             retried = False
             _assistant_buf: list[str] = []
-            _first_output_seen = False
             while True:
                 try:
                     async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
@@ -741,7 +683,6 @@ class SessionManager:
                                 if not retried:
                                     retried = True
                                     log.info("Session %s not found on %s, respawning", session_id, mind_url)
-                                    self.glass_emit("respawn", session_id, mind_id, reason="404 from mind")
                                     routing = await self._routing_for(session)
                                     await self._spawn(
                                         session_id, session["model"],
@@ -770,10 +711,6 @@ class SessionManager:
                                     "Mind %s returned HTTP %s for session %s: %s",
                                     mind_id, resp.status, session_id, detail,
                                 )
-                                self.glass_emit(
-                                    "error", session_id, mind_id,
-                                    detail=f"HTTP {resp.status}: {str(detail)[:200]}",
-                                )
                                 err_event = {
                                     "type": "result",
                                     "subtype": "error",
@@ -797,10 +734,6 @@ class SessionManager:
                                 except json.JSONDecodeError:
                                     continue
 
-                                if not _first_output_seen:
-                                    _first_output_seen = True
-                                    self.glass_emit("first_output", session_id, mind_id)
-
                                 observer_only = bool(event.pop("_observer_only", False))
 
                                 # Detect stale --resume
@@ -814,7 +747,6 @@ class SessionManager:
                                     )
                                 ):
                                     log.warning("Stale resume for session %s — retrying", session_id)
-                                    self.glass_emit("respawn", session_id, mind_id, reason="stale resume")
                                     retried = True
                                     await self._kill_process(session_id)
                                     await self._db.execute(
@@ -868,20 +800,11 @@ class SessionManager:
                                     log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
                                     if elapsed > 30:
                                         log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
-                                    self.glass_emit(
-                                        "replied", session_id, mind_id,
-                                        elapsed=round(elapsed, 1),
-                                        is_error=bool(event.get("is_error")),
-                                    )
                                     return
                             else:
                                 return  # stream exhausted
                 except aiohttp.ClientError as exc:
                     log.error("Mind container %s unreachable for session %s: %s", mind_url, session_id, exc)
-                    self.glass_emit(
-                        "error", session_id, mind_id,
-                        detail=f"mind unreachable: {str(exc)[:200]}",
-                    )
                     yield {"type": "result", "is_error": True, "errors": [f"Mind container unreachable: {exc}"]}
                     return
                 break  # exit retry loop on success
