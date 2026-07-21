@@ -256,3 +256,38 @@ class TestClaudeSidWriteback:
         client, _ = app_client
         resp = client.post("/sessions/nope/claude-sid", json={"claude_sid": "x"})
         assert resp.status_code == 404
+
+    def test_refuses_to_overwrite_an_established_conversation(self, app_client):
+        """A mind mints a conversation id whenever it is handed none, which
+        also happens to a live session whose id has not been recorded yet.
+        Writing that unconditionally pointed a running Telegram conversation
+        at an empty one, and the next message resumed the blank."""
+        client, server_module = app_client
+        _run(_seed_session_and_mind(
+            server_module, session_id="sess-live", claude_sid="the-real-conversation"
+        ))
+
+        resp = client.post(
+            "/sessions/sess-live/claude-sid", json={"claude_sid": "blank-chat"}
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        # The caller is told which conversation won, so it can back out of
+        # the blank one it just opened.
+        assert body["claude_sid"] == "the-real-conversation"
+        row = _run(server_module.session_mgr.get_session("sess-live"))
+        assert row["claude_sid"] == "the-real-conversation"
+
+    def test_reclaiming_the_same_sid_is_accepted(self, app_client):
+        client, server_module = app_client
+        _run(_seed_session_and_mind(
+            server_module, session_id="sess-same", claude_sid="same-sid"
+        ))
+
+        resp = client.post("/sessions/sess-same/claude-sid", json={"claude_sid": "same-sid"})
+
+        assert resp.json()["ok"] is True
+        row = _run(server_module.session_mgr.get_session("sess-same"))
+        assert row["claude_sid"] == "same-sid"

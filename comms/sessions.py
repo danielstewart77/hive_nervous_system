@@ -717,6 +717,7 @@ class SessionManager:
             import aiohttp
             retried = False
             _assistant_buf: list[str] = []
+            _recorded_sid = session.get("claude_sid") or None
             while True:
                 try:
                     async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
@@ -813,6 +814,7 @@ class SessionManager:
                                 ):
                                     log.warning("Stale resume for session %s — retrying", session_id)
                                     retried = True
+                                    _recorded_sid = None  # the respawn will claim a new one
                                     await self._kill_process(session_id)
                                     await self._db.execute(
                                         "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
@@ -848,13 +850,24 @@ class SessionManager:
                                     (now, session_id),
                                 )
 
+                                # Record the conversation id from the first
+                                # event that carries one (the harness emits it
+                                # on its init event), not just at the end of
+                                # the turn. A session mid-first-turn used to
+                                # have no claude_sid at all, so anything asking
+                                # "what conversation is this?" — the web
+                                # terminal's attach above all — was told
+                                # nothing and opened a blank one instead.
+                                event_sid = event.get("session_id")
+                                if event_sid and event_sid != _recorded_sid:
+                                    _recorded_sid = event_sid
+                                    await self._db.execute(
+                                        "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                                        (event_sid, session_id),
+                                    )
+                                    await self._db.commit()
+
                                 if event.get("type") == "result":
-                                    claude_sid = event.get("session_id")
-                                    if claude_sid:
-                                        await self._db.execute(
-                                            "UPDATE sessions SET claude_sid = ? WHERE id = ?",
-                                            (claude_sid, session_id),
-                                        )
                                     if _assistant_buf:
                                         await self._db.execute(
                                             "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",

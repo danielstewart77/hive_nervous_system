@@ -378,6 +378,13 @@ async def set_claude_sid(session_id: str, body: ClaudeSidRequest):
     that normally captures claude_sid, so without this write-back every
     attach started a blank conversation. The mind reports the id it
     claimed via --session-id; subsequent attaches --resume it.
+
+    Claim-only, never overwrite. A mind mints a fresh id whenever it is
+    handed no resume_sid, which also happens when a session simply has not
+    recorded one yet — so an unconditional write let a browser attach point
+    a live Telegram conversation at an empty one, and the next message on
+    that surface resumed the blank. The existing id wins; the caller is
+    told which one it lost to.
     """
     sid = (body.claude_sid or "").strip()
     if not sid:
@@ -385,8 +392,17 @@ async def set_claude_sid(session_id: str, body: ClaudeSidRequest):
     session = await session_mgr.get_session(session_id)
     if not session:
         return JSONResponse({"error": "session not found"}, status_code=404)
+    existing = (session.get("claude_sid") or "").strip()
+    if existing and existing != sid:
+        log.warning(
+            "refusing to overwrite claude_sid for session %s (have %s, offered %s)",
+            session_id, existing, sid,
+        )
+        return {"ok": False, "session_id": session_id, "claude_sid": existing,
+                "reason": "already claimed"}
     await session_mgr._db.execute(
-        "UPDATE sessions SET claude_sid = ? WHERE id = ?", (sid, session_id)
+        "UPDATE sessions SET claude_sid = ? WHERE id = ? AND (claude_sid IS NULL OR claude_sid = '')",
+        (sid, session_id),
     )
     await session_mgr._db.commit()
     return {"ok": True, "session_id": session_id, "claude_sid": sid}
