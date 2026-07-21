@@ -180,3 +180,52 @@ class TestWsAttach:
         with pytest.raises(Exception):
             with client.websocket_connect("/sessions/sess-attach3/attach") as ws:
                 ws.receive_bytes()
+
+    def test_kill_session_tears_down_live_attach_with_4410(self, app_client, monkeypatch):
+        """The attach pty is a separate process kill_session can't reach;
+        the bridge must notice the session_closed event and drop, closing
+        the browser side with 4410 so the tile reports the ending instead
+        of hunting a successor."""
+        from starlette.websockets import WebSocketDisconnect
+
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-end"))
+
+        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/sessions/sess-end/attach") as ws:
+                assert ws.receive_bytes() == b"tui up\r\n"  # bridge is live
+                client.portal.call(server_module.session_mgr.kill_session, "sess-end")
+                ws.receive_bytes()  # blocks until the watcher closes the bridge
+
+        assert excinfo.value.code == 4410
+
+    def test_attach_to_archived_session_is_not_immediately_closed(self, app_client, monkeypatch):
+        """Opening an already-closed (archived) session is a deliberate
+        resurrection: the close-watcher must not arm, or it would fire the
+        instant the bridge opens."""
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-archived"))
+        mgr = server_module.session_mgr
+        _run(mgr._db.execute(
+            "UPDATE sessions SET status = 'closed' WHERE id = 'sess-archived'"
+        ))
+        _run(mgr._db.commit())
+
+        fake_ws = _FakeMindWS(incoming=[b"resurrected\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with client.websocket_connect("/sessions/sess-archived/attach") as ws:
+            assert ws.receive_bytes() == b"resurrected\r\n"
+            ws.send_bytes(b"hi\n")
+            for _ in range(20):
+                if fake_ws.sent:
+                    break
+                time.sleep(0.05)
+            assert fake_ws.sent == [b"hi\n"]
