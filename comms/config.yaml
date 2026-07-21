@@ -1,0 +1,9 @@
+providers:
+  anthropic: {}
+  ollama:
+    api_base: "http://192.168.4.64:11434"
+
+models:
+  sonnet: anthropic
+  opus: anthropic
+  haiku: anthropic
