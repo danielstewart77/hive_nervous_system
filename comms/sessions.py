@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     status        TEXT NOT NULL DEFAULT 'running',
     mind_id       TEXT DEFAULT 'ada',
     group_session_id TEXT,
-    rotation_armed INTEGER NOT NULL DEFAULT 0
+    rotation_armed INTEGER NOT NULL DEFAULT 0,
+    rotated_from  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -224,6 +225,16 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        # Migration: add rotated_from, the id of the session this one replaced.
+        # Surfaces that reattach across a rotation need to identify the
+        # successor exactly; without lineage they guess by mind, and with two
+        # terminals open on one mind the guess lands on the *other* live
+        # session and the two conversations cross.
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN rotated_from TEXT")
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
         # Mark any previously "running" sessions as idle (stale from crash)
         await self._db.execute(
             "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
@@ -300,6 +311,7 @@ class SessionManager:
         allowed_directories: list[str] | None = None,
         *,
         mind_id: str,
+        rotated_from: str | None = None,
     ) -> dict:
         """Create a new session, spawn process, return session info."""
         # The mind's preferred model lives in broker.minds (set at registration
@@ -322,9 +334,9 @@ class SessionManager:
         now = time.time()
 
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at, last_active, status, mind_id)
-               VALUES (?, ?, ?, ?, ?, ?, 'running', ?)""",
-            (session_id, owner_type, owner_ref, model, now, now, mind_id),
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at, last_active, status, mind_id, rotated_from)
+               VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+            (session_id, owner_type, owner_ref, model, now, now, mind_id, rotated_from),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -489,6 +501,7 @@ class SessionManager:
             owner_ref=routing["owner_ref"],
             client_ref=client_ref,
             mind_id=session["mind_id"],
+            rotated_from=old_id,
         )
         return new["id"]
 
@@ -1078,16 +1091,40 @@ class SessionManager:
         log.info("Spawned %s session %s via %s", mind_id, session_id, mind_url)
         return self._procs[session_id]
 
+    async def _mind_url_for_session(self, session_id: str, mind_id: str | None = None) -> str | None:
+        """Resolve a session's mind base URL from the database.
+
+        The fallback path for anything the in-memory process cache doesn't
+        know about.
+        """
+        if not mind_id:
+            row = await self._get_row(session_id)
+            mind_id = (row or {}).get("mind_id")
+        if not mind_id:
+            return None
+        try:
+            mind_row = await self._get_mind_row(mind_id)
+        except Exception:
+            log.warning("Cannot resolve mind %s for session %s", mind_id, session_id)
+            return None
+        return (mind_row or {}).get("gateway_url")
+
     async def _kill_process(self, session_id: str):
         """Kill a session on its mind container via HTTP."""
         await self.kill_rc_process(session_id)
 
         proc = self._procs.pop(session_id, None)
-        mind_id = self._mind_ids.pop(session_id, "ada")
-        if proc is None:
-            return
+        mind_id = self._mind_ids.pop(session_id, None)
 
-        mind_url = proc.get("_mind_url")
+        mind_url = (proc or {}).get("_mind_url")
+        if not mind_url:
+            # Nothing in memory doesn't mean nothing is running. A session
+            # born in the browser terminal never went through _spawn, and
+            # after a hive-comms restart the cache is empty for every live
+            # session. Either way the mind still holds a process (the web
+            # terminal's pty outlives its socket by design), so resolve the
+            # mind from the DB instead of leaking it.
+            mind_url = await self._mind_url_for_session(session_id, mind_id)
         if not mind_url:
             log.warning("No mind_url for session %s, cannot kill", session_id)
             return
@@ -1449,4 +1486,5 @@ class SessionManager:
             "last_active": row["last_active"],
             "status": row["status"],
             "mind_id": row.get("mind_id", "ada"),
+            "rotated_from": row.get("rotated_from"),
         }
