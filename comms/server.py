@@ -366,6 +366,32 @@ async def toggle_autopilot(session_id: str):
 # ---------------------------------------------------------------------------
 # Rotation-memory endpoint
 # ---------------------------------------------------------------------------
+class ClaudeSidRequest(BaseModel):
+    claude_sid: str
+
+
+@app.post("/sessions/{session_id}/claude-sid")
+async def set_claude_sid(session_id: str, body: ClaudeSidRequest):
+    """Record the claude conversation id a pty attach pinned.
+
+    Terminal-born sessions never pass through the stream-json spawn path
+    that normally captures claude_sid, so without this write-back every
+    attach started a blank conversation. The mind reports the id it
+    claimed via --session-id; subsequent attaches --resume it.
+    """
+    sid = (body.claude_sid or "").strip()
+    if not sid:
+        return JSONResponse({"error": "claude_sid required"}, status_code=400)
+    session = await session_mgr.get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "session not found"}, status_code=404)
+    await session_mgr._db.execute(
+        "UPDATE sessions SET claude_sid = ? WHERE id = ?", (sid, session_id)
+    )
+    await session_mgr._db.commit()
+    return {"ok": True, "session_id": session_id, "claude_sid": sid}
+
+
 @app.post("/sessions/{session_id}/rotation-memory")
 async def write_rotation_memory(session_id: str, body: RotationMemoryRequest):
     """Persist a rotation summary for (mind_id, client_ref).

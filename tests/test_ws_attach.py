@@ -229,3 +229,30 @@ class TestWsAttach:
                     break
                 time.sleep(0.05)
             assert fake_ws.sent == [b"hi\n"]
+
+
+class TestClaudeSidWriteback:
+    """POST /sessions/{id}/claude-sid — pty-claimed conversation id recording."""
+
+    def test_records_claude_sid(self, app_client):
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-sid", claude_sid=None))
+
+        resp = client.post("/sessions/sess-sid/claude-sid", json={"claude_sid": "claude-new"})
+
+        assert resp.status_code == 200
+        row = _run(server_module.session_mgr.get_session("sess-sid"))
+        assert row["claude_sid"] == "claude-new"
+
+    def test_rejects_empty_sid(self, app_client):
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-sid2"))
+
+        resp = client.post("/sessions/sess-sid2/claude-sid", json={"claude_sid": "  "})
+
+        assert resp.status_code == 400
+
+    def test_unknown_session_404s(self, app_client):
+        client, _ = app_client
+        resp = client.post("/sessions/nope/claude-sid", json={"claude_sid": "x"})
+        assert resp.status_code == 404
