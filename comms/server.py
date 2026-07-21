@@ -468,21 +468,24 @@ async def ws_stream(ws: WebSocket, session_id: str):
 
 
 async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> None:
-    """Bridge raw bytes between the browser's WS and the mind's pty-attach WS.
+    """Bridge the browser's WS and the mind's pty-attach WS.
 
-    Whichever side closes first ends the bridge — a live pty and a browser
-    tab have no independent life of their own once either end is gone.
+    Frame types are load-bearing on the browser→mind leg: BINARY frames
+    are raw terminal bytes, TEXT frames are JSON control messages
+    (resize) the mind applies to the pty — so TEXT must be forwarded as
+    TEXT, never re-encoded into the byte stream. Whichever side closes
+    first ends the bridge — a live pty and a browser tab have no
+    independent life of their own once either end is gone.
     """
     async def browser_to_mind() -> None:
         while True:
             msg = await browser_ws.receive()
             if msg.get("type") == "websocket.disconnect":
                 return
-            data = msg.get("bytes")
-            if data is None and msg.get("text") is not None:
-                data = msg["text"].encode()
-            if data:
-                await mind_ws.send_bytes(data)
+            if msg.get("bytes"):
+                await mind_ws.send_bytes(msg["bytes"])
+            elif msg.get("text"):
+                await mind_ws.send_str(msg["text"])
 
     async def mind_to_browser() -> None:
         async for msg in mind_ws:
@@ -536,6 +539,10 @@ async def ws_attach(ws: WebSocket, session_id: str):
     params = urlencode({
         "resume_sid": session.get("claude_sid") or "",
         "model": session.get("model") or "sonnet",
+        # Initial pty geometry from the browser tile, so the TUI's first
+        # paint matches; live changes arrive as resize control frames.
+        "cols": ws.query_params.get("cols") or "80",
+        "rows": ws.query_params.get("rows") or "24",
     })
     attach_url = f"{mind_ws_url}/sessions/{session_id}/attach-pty?{params}"
 
