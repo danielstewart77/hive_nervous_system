@@ -547,10 +547,38 @@ async def ws_attach(ws: WebSocket, session_id: str):
     attach_url = f"{mind_ws_url}/sessions/{session_id}/attach-pty?{params}"
 
     await ws.accept()
+
+    async def _watch_for_close() -> None:
+        # The attach pty is a separate process from the session's tracked
+        # subprocess — kill_session never reaches it. Watching the session
+        # event stream lets a kill (end-session, /kill, rotation) tear the
+        # bridge down, which cascades: mind_ws closes → mind_server's
+        # attach loop exits → the pty process is terminated.
+        async for event in session_mgr.stream_session_events(session_id):
+            if event.get("type") == "session_closed":
+                return
+
+    # Attaching to an already-closed (archived) session is a deliberate
+    # resurrection — no close-watcher, or it would fire instantly. The
+    # watcher only guards sessions that were live at attach time.
+    was_live = session.get("status") != "closed"
+
     try:
         async with aiohttp.ClientSession() as http:
             async with http.ws_connect(attach_url) as mind_ws:
-                await _pump_attach_ws(ws, mind_ws)
+                pump = asyncio.ensure_future(_pump_attach_ws(ws, mind_ws))
+                tasks = {pump}
+                closed = None
+                if was_live:
+                    closed = asyncio.ensure_future(_watch_for_close())
+                    tasks.add(closed)
+                try:
+                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                if closed is not None and closed in done:
+                    await ws.close(code=4410, reason="session closed")
     except aiohttp.ClientError as exc:
         log.warning("attach-pty proxy to %s failed: %s", attach_url, exc)
         await ws.close(code=1011, reason="mind unreachable")
