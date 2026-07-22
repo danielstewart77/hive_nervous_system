@@ -181,6 +181,33 @@ class TestWsAttach:
             with client.websocket_connect("/sessions/sess-attach3/attach") as ws:
                 ws.receive_bytes()
 
+    def test_mind_without_pty_route_closes_4415(self, app_client, monkeypatch):
+        """A mind whose image predates the pty work answers the handshake
+        with 403. That is permanent, not a blip, so it must not share the
+        1011 code a client retries on."""
+        from starlette.websockets import WebSocketDisconnect
+
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-nopty"))
+
+        _FakeHttpSession.ws_to_return = None
+        _FakeHttpSession.raise_on_connect = aiohttp.WSServerHandshakeError(
+            aiohttp.RequestInfo(
+                url="ws://mind.test:8420/attach-pty", method="GET",
+                headers=aiohttp.typedefs.CIMultiDict(), real_url="ws://mind.test:8420/attach-pty",
+            ),
+            (),
+            status=403,
+            message="Invalid response status",
+        )
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/sessions/sess-nopty/attach") as ws:
+                ws.receive_bytes()
+
+        assert excinfo.value.code == 4415
+
     def test_kill_session_tears_down_live_attach_with_4410(self, app_client, monkeypatch):
         """The attach pty is a separate process kill_session can't reach;
         the bridge must notice the session_closed event and drop, closing
