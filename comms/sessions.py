@@ -235,6 +235,18 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        # Backfill: every session owns a conversation id. Rows created before
+        # the id was minted at session creation may still be blank — those are
+        # sessions that never finished a turn, so there is no conversation on
+        # disk to lose. Give them one now rather than leaving a hole any
+        # attach would have to invent its way around.
+        await self._db.execute(
+            "UPDATE sessions SET claude_sid = lower(hex(randomblob(4))) || '-' "
+            "|| lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) "
+            "|| '-a' || substr(lower(hex(randomblob(2))),2) || '-' "
+            "|| lower(hex(randomblob(6))) "
+            "WHERE claude_sid IS NULL OR claude_sid = ''"
+        )
         # Mark any previously "running" sessions as idle (stale from crash)
         await self._db.execute(
             "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
@@ -331,12 +343,19 @@ class SessionManager:
                 )
 
         session_id = str(uuid.uuid4())
+        # The conversation id is minted HERE and nowhere else. A session owns
+        # one conversation from birth, before any surface has spoken to it, so
+        # "which conversation is this?" always has an answer — for Telegram,
+        # for the web terminal, for a session that has never taken a turn.
+        # Minds are handed this id and pin the harness to it; they never mint
+        # one of their own, and nothing downstream ever overwrites it.
+        claude_sid = str(uuid.uuid4())
         now = time.time()
 
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at, last_active, status, mind_id, rotated_from)
-               VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
-            (session_id, owner_type, owner_ref, model, now, now, mind_id, rotated_from),
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+            (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -359,6 +378,7 @@ class SessionManager:
             session_id,
             model,
             autopilot=False,
+            resume_sid=claude_sid,
             surface_prompt=surface_prompt,
             allowed_directories=allowed_directories,
             soul_file=soul_file,
@@ -717,7 +737,8 @@ class SessionManager:
             import aiohttp
             retried = False
             _assistant_buf: list[str] = []
-            _recorded_sid = session.get("claude_sid") or None
+            _pinned_sid = session.get("claude_sid") or None
+            _sid_warned = False
             while True:
                 try:
                     async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
@@ -814,17 +835,25 @@ class SessionManager:
                                 ):
                                     log.warning("Stale resume for session %s — retrying", session_id)
                                     retried = True
-                                    _recorded_sid = None  # the respawn will claim a new one
                                     await self._kill_process(session_id)
+                                    # Mint the replacement here rather than
+                                    # blanking the column and letting the mind
+                                    # invent one: a session is never without a
+                                    # conversation id, not even for the width
+                                    # of a respawn.
+                                    fresh_sid = str(uuid.uuid4())
                                     await self._db.execute(
-                                        "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
-                                        (session_id,),
+                                        "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                                        (fresh_sid, session_id),
                                     )
                                     await self._db.commit()
+                                    _pinned_sid = fresh_sid
+                                    _sid_warned = False
                                     routing = await self._routing_for(session)
                                     await self._spawn(
                                         session_id, session["model"],
                                         autopilot=bool(session["autopilot"]),
+                                        resume_sid=fresh_sid,
                                         mind_id=mind_id,
                                         **routing,
                                     )
@@ -850,22 +879,18 @@ class SessionManager:
                                     (now, session_id),
                                 )
 
-                                # Record the conversation id from the first
-                                # event that carries one (the harness emits it
-                                # on its init event), not just at the end of
-                                # the turn. A session mid-first-turn used to
-                                # have no claude_sid at all, so anything asking
-                                # "what conversation is this?" — the web
-                                # terminal's attach above all — was told
-                                # nothing and opened a blank one instead.
+                                # The harness echoes the conversation id we
+                                # pinned it to. It is not news, and it is not
+                                # authority: the row was written at session
+                                # creation. Log a divergence, never follow it.
                                 event_sid = event.get("session_id")
-                                if event_sid and event_sid != _recorded_sid:
-                                    _recorded_sid = event_sid
-                                    await self._db.execute(
-                                        "UPDATE sessions SET claude_sid = ? WHERE id = ?",
-                                        (event_sid, session_id),
+                                if event_sid and event_sid != _pinned_sid and not _sid_warned:
+                                    _sid_warned = True
+                                    log.warning(
+                                        "Mind %s reported conversation %s for session %s, "
+                                        "which is pinned to %s — ignoring",
+                                        mind_id, event_sid, session_id, _pinned_sid,
                                     )
-                                    await self._db.commit()
 
                                 if event.get("type") == "result":
                                     if _assistant_buf:
@@ -1073,6 +1098,13 @@ class SessionManager:
         owner_ref: str | None = None,
         system_prompt_blocks: str = "",
     ) -> Any:
+        # Every spawn carries the session's conversation id. A mind handed
+        # none would have to invent one, and an invented id is a conversation
+        # only that process knows about — the blank-terminal bug in one line.
+        if not resume_sid:
+            raise ValueError(
+                f"refusing to spawn session {session_id} without a conversation id"
+            )
         row = await self._get_mind_row(mind_id)
         mind_url = row["gateway_url"]
         mind_name = row["name"]
