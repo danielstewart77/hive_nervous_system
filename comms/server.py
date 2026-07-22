@@ -366,48 +366,6 @@ async def toggle_autopilot(session_id: str):
 # ---------------------------------------------------------------------------
 # Rotation-memory endpoint
 # ---------------------------------------------------------------------------
-class ClaudeSidRequest(BaseModel):
-    claude_sid: str
-
-
-@app.post("/sessions/{session_id}/claude-sid")
-async def set_claude_sid(session_id: str, body: ClaudeSidRequest):
-    """Record the claude conversation id a pty attach pinned.
-
-    Terminal-born sessions never pass through the stream-json spawn path
-    that normally captures claude_sid, so without this write-back every
-    attach started a blank conversation. The mind reports the id it
-    claimed via --session-id; subsequent attaches --resume it.
-
-    Claim-only, never overwrite. A mind mints a fresh id whenever it is
-    handed no resume_sid, which also happens when a session simply has not
-    recorded one yet — so an unconditional write let a browser attach point
-    a live Telegram conversation at an empty one, and the next message on
-    that surface resumed the blank. The existing id wins; the caller is
-    told which one it lost to.
-    """
-    sid = (body.claude_sid or "").strip()
-    if not sid:
-        return JSONResponse({"error": "claude_sid required"}, status_code=400)
-    session = await session_mgr.get_session(session_id)
-    if not session:
-        return JSONResponse({"error": "session not found"}, status_code=404)
-    existing = (session.get("claude_sid") or "").strip()
-    if existing and existing != sid:
-        log.warning(
-            "refusing to overwrite claude_sid for session %s (have %s, offered %s)",
-            session_id, existing, sid,
-        )
-        return {"ok": False, "session_id": session_id, "claude_sid": existing,
-                "reason": "already claimed"}
-    await session_mgr._db.execute(
-        "UPDATE sessions SET claude_sid = ? WHERE id = ? AND (claude_sid IS NULL OR claude_sid = '')",
-        (sid, session_id),
-    )
-    await session_mgr._db.commit()
-    return {"ok": True, "session_id": session_id, "claude_sid": sid}
-
-
 @app.post("/sessions/{session_id}/rotation-memory")
 async def write_rotation_memory(session_id: str, body: RotationMemoryRequest):
     """Persist a rotation summary for (mind_id, client_ref).
@@ -577,9 +535,18 @@ async def ws_attach(ws: WebSocket, session_id: str):
         await ws.close(code=4404, reason=str(exc))
         return
 
+    # A session without a conversation id cannot be attached to. Say so
+    # instead of proxying through and letting the terminal open on nothing —
+    # a blank tile beside a live chat is worse than a visible failure.
+    conversation_id = (session.get("claude_sid") or "").strip()
+    if not conversation_id:
+        log.error("session %s has no conversation id — refusing attach", session_id)
+        await ws.close(code=4409, reason="session has no conversation to attach to")
+        return
+
     mind_ws_url = mind_row["gateway_url"].replace("http://", "ws://").replace("https://", "wss://")
     params = urlencode({
-        "resume_sid": session.get("claude_sid") or "",
+        "resume_sid": conversation_id,
         "model": session.get("model") or "sonnet",
         # Initial pty geometry from the browser tile, so the TUI's first
         # paint matches; live changes arrive as resize control frames.

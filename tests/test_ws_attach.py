@@ -231,63 +231,16 @@ class TestWsAttach:
             assert fake_ws.sent == [b"hi\n"]
 
 
-class TestClaudeSidWriteback:
-    """POST /sessions/{id}/claude-sid — pty-claimed conversation id recording."""
+class TestAttachRequiresAConversation:
+    """A tile that appears attachable but has no conversation must fail
+    visibly rather than opening as a blank terminal."""
 
-    def test_records_claude_sid(self, app_client):
-        client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, session_id="sess-sid", claude_sid=None))
-
-        resp = client.post("/sessions/sess-sid/claude-sid", json={"claude_sid": "claude-new"})
-
-        assert resp.status_code == 200
-        row = _run(server_module.session_mgr.get_session("sess-sid"))
-        assert row["claude_sid"] == "claude-new"
-
-    def test_rejects_empty_sid(self, app_client):
-        client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, session_id="sess-sid2"))
-
-        resp = client.post("/sessions/sess-sid2/claude-sid", json={"claude_sid": "  "})
-
-        assert resp.status_code == 400
-
-    def test_unknown_session_404s(self, app_client):
-        client, _ = app_client
-        resp = client.post("/sessions/nope/claude-sid", json={"claude_sid": "x"})
-        assert resp.status_code == 404
-
-    def test_refuses_to_overwrite_an_established_conversation(self, app_client):
-        """A mind mints a conversation id whenever it is handed none, which
-        also happens to a live session whose id has not been recorded yet.
-        Writing that unconditionally pointed a running Telegram conversation
-        at an empty one, and the next message resumed the blank."""
+    def test_session_without_a_conversation_id_is_refused(self, app_client):
         client, server_module = app_client
         _run(_seed_session_and_mind(
-            server_module, session_id="sess-live", claude_sid="the-real-conversation"
+            server_module, session_id="sess-hollow", claude_sid=None
         ))
 
-        resp = client.post(
-            "/sessions/sess-live/claude-sid", json={"claude_sid": "blank-chat"}
-        )
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is False
-        # The caller is told which conversation won, so it can back out of
-        # the blank one it just opened.
-        assert body["claude_sid"] == "the-real-conversation"
-        row = _run(server_module.session_mgr.get_session("sess-live"))
-        assert row["claude_sid"] == "the-real-conversation"
-
-    def test_reclaiming_the_same_sid_is_accepted(self, app_client):
-        client, server_module = app_client
-        _run(_seed_session_and_mind(
-            server_module, session_id="sess-same", claude_sid="same-sid"
-        ))
-
-        resp = client.post("/sessions/sess-same/claude-sid", json={"claude_sid": "same-sid"})
-
-        assert resp.json()["ok"] is True
-        row = _run(server_module.session_mgr.get_session("sess-same"))
-        assert row["claude_sid"] == "same-sid"
+        with pytest.raises(Exception):
+            with client.websocket_connect("/sessions/sess-hollow/attach") as ws:
+                ws.receive_bytes()
