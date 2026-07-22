@@ -588,6 +588,15 @@ async def ws_attach(ws: WebSocket, session_id: str):
                         task.cancel()
                 if closed is not None and closed in done:
                     await ws.close(code=4410, reason="session closed")
+    except aiohttp.WSServerHandshakeError as exc:
+        # The mind answered, and said no. Starlette replies 403 to a
+        # websocket path it has no route for, so this is how a mind whose
+        # image predates the pty work presents: reachable, no terminal.
+        # That is permanent until the mind is rebuilt, and a client that
+        # cannot tell it apart from a dropped connection will reconnect
+        # forever — so it gets its own close code and no retry.
+        log.warning("attach-pty proxy to %s refused: %s", attach_url, exc)
+        await ws.close(code=4415, reason="mind has no terminal attach route")
     except aiohttp.ClientError as exc:
         log.warning("attach-pty proxy to %s failed: %s", attach_url, exc)
         await ws.close(code=1011, reason="mind unreachable")
