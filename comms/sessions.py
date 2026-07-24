@@ -441,6 +441,100 @@ class SessionManager:
 
         return sessions
 
+    # Surfaces whose sessions a person can pick up somewhere else. A broker
+    # or scheduler session is machine-driven — nobody is holding it, and
+    # offering it in a chat picker is offering to hijack an errand.
+    _ADOPTABLE_OWNER_TYPES = ("web", "terminal")
+
+    @staticmethod
+    def _surface_label(owner_type: str) -> str:
+        """The human name of a surface, without its mind-uuid suffix."""
+        base = (owner_type or "").split(":", 1)[0]
+        return "terminal" if base in SessionManager._ADOPTABLE_OWNER_TYPES else base
+
+    async def list_selectable_sessions(
+        self,
+        owner_ref: str,
+        client_type: str | None = None,
+        client_ref: str | None = None,
+        mind_id: str | None = None,
+    ) -> list[dict]:
+        """Sessions this surface can switch to — its own, plus live ones
+        another surface is holding on the same mind.
+
+        A conversation started in the browser terminal used to be invisible
+        from Telegram: the surfaces share the conversation id and the
+        transcript, but the session row is scoped by ``owner_ref``, so a
+        chat could only ever see what the chat had started. That is the
+        whole gap — you had to be back at a browser to continue what you
+        started at the desk. Adoptable rows carry ``adoptable: True`` so a
+        picker can say where a session is currently living.
+        """
+        sessions = await self.list_sessions(
+            owner_ref=owner_ref, client_type=client_type, client_ref=client_ref
+        )
+        for session in sessions:
+            session["surface"] = self._surface_label(session.get("owner_type", ""))
+            session["adoptable"] = False
+        seen = {s["id"] for s in sessions}
+
+        placeholders = ",".join("?" for _ in self._ADOPTABLE_OWNER_TYPES)
+        query = (
+            f"SELECT * FROM sessions WHERE owner_type IN ({placeholders}) "
+            "AND status != 'closed' AND owner_ref != ?"
+        )
+        params: list = [*self._ADOPTABLE_OWNER_TYPES, owner_ref]
+        if mind_id:
+            query += " AND mind_id = ?"
+            params.append(mind_id)
+        query += " ORDER BY last_active DESC"
+
+        rows = await self._db.execute(query, params)
+        for row in await rows.fetchall():
+            session = dict(row)
+            if session["id"] in seen:
+                continue
+            session["surface"] = self._surface_label(session.get("owner_type", ""))
+            session["adoptable"] = True
+            session["is_active"] = False
+            sessions.append(session)
+
+        return sessions
+
+    async def release_on_mind(self, session_id: str, surface: str) -> bool:
+        """Ask the mind to end one surface's process, keeping the session.
+
+        The conversation lives in the transcript, so ending a process is
+        not ending the conversation — the next surface resumes it. Minds
+        that predate the route simply answer 404, which is not an error
+        here: nothing to release is the same outcome as released.
+        """
+        mind_url = (self._procs.get(session_id) or {}).get("_mind_url")
+        if not mind_url:
+            mind_url = await self._mind_url_for_session(
+                session_id, self._mind_ids.get(session_id)
+            )
+        if not mind_url:
+            log.warning("No mind_url for session %s, cannot release %s", session_id, surface)
+            return False
+
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    f"{mind_url}/sessions/{session_id}/release",
+                    params={"surface": surface},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 404:
+                        log.info("Mind at %s has no release route — nothing to hand over", mind_url)
+                        return False
+                    body = await resp.json()
+                    return bool(body.get("released"))
+        except Exception:
+            log.exception("Failed to release %s for session %s", surface, session_id)
+            return False
+
     async def get_active_session(self, client_type: str, client_ref: str) -> dict | None:
         """Get the active session for a client surface, only if it's still
         actually running. A closed session that the active_sessions table
@@ -588,12 +682,41 @@ class SessionManager:
                 continue
 
     async def activate_session(
-        self, session_id: str, client_type: str, client_ref: str
+        self, session_id: str, client_type: str, client_ref: str,
+        owner_type: str | None = None, owner_ref: str | None = None,
     ) -> dict:
-        """Set a session as active on a client surface. Respawn if idle."""
+        """Set a session as active on a client surface. Respawn if idle.
+
+        Passing ``owner_type``/``owner_ref`` makes this an *adoption*: a
+        session another surface holds moves here. That means ending the
+        outgoing process — two harness processes on one conversation each
+        hold it in memory, neither sees the other's turns, and both append
+        turns the other doesn't know happened — and retargeting the row so
+        replies and unsolicited turns follow the session to its new home.
+        The conversation itself is untouched: it lives in the transcript,
+        and the respawn below resumes it with everything the other surface
+        said still in it.
+        """
         session = await self._get_row(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
+
+        adopting = bool(owner_ref) and (
+            session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
+        )
+        if adopting:
+            await self.release_on_mind(session_id, "terminal")
+            await self._db.execute(
+                "UPDATE sessions SET owner_type = ?, owner_ref = ?, status = 'idle' WHERE id = ?",
+                (owner_type, owner_ref, session_id),
+            )
+            await self._db.execute(
+                "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
+            )
+            await self._db.commit()
+            log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
+                     owner_type, owner_ref, session["owner_type"], session["owner_ref"])
+            session = await self._get_row(session_id)
 
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
