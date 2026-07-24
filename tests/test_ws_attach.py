@@ -22,10 +22,12 @@ def _run(coro):
 class _FakeMindWS:
     """Stands in for aiohttp's ClientWebSocketResponse."""
 
-    def __init__(self, incoming: list[bytes] | None = None):
+    def __init__(self, incoming: list[bytes] | None = None, close_with: tuple[int, str] | None = None):
         self._incoming = list(incoming or [])
+        self._close_with = close_with
         self._block = asyncio.Event()
         self.sent: list[bytes] = []
+        self.close_code: int | None = None
 
     def __aiter__(self):
         return self
@@ -34,6 +36,11 @@ class _FakeMindWS:
         if self._incoming:
             data = self._incoming.pop(0)
             return type("Msg", (), {"type": aiohttp.WSMsgType.BINARY, "data": data})()
+        if self._close_with is not None:
+            code, reason = self._close_with
+            self._close_with = None
+            self.close_code = code
+            return type("Msg", (), {"type": aiohttp.WSMsgType.CLOSE, "data": code, "extra": reason})()
         await self._block.wait()  # never set — blocks until the pump is cancelled
         raise StopAsyncIteration
 
@@ -230,6 +237,47 @@ class TestWsAttach:
                 ws.receive_bytes()  # blocks until the watcher closes the bridge
 
         assert excinfo.value.code == 4410
+
+    def test_mind_close_code_reaches_the_browser(self, app_client, monkeypatch):
+        """A mind evicting a stale attach closes 1012, which is the tile's
+        only signal to stand down rather than reconnect. Swallowing it into
+        a plain close makes two tiles evict each other in a loop."""
+        from starlette.websockets import WebSocketDisconnect
+
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-evicted"))
+
+        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"], close_with=(1012, "attached elsewhere"))
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/sessions/sess-evicted/attach") as ws:
+                assert ws.receive_bytes() == b"tui up\r\n"
+                ws.receive_bytes()  # blocks until the eviction propagates
+
+        assert excinfo.value.code == 1012
+
+    def test_terminal_exit_code_reaches_the_browser(self, app_client, monkeypatch):
+        """Same path for a pty that exited: 1000 means the terminal is gone,
+        not that the socket dropped."""
+        from starlette.websockets import WebSocketDisconnect
+
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-exited"))
+
+        fake_ws = _FakeMindWS(incoming=[b"bye\r\n"], close_with=(1000, "terminal exited"))
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/sessions/sess-exited/attach") as ws:
+                assert ws.receive_bytes() == b"bye\r\n"
+                ws.receive_bytes()
+
+        assert excinfo.value.code == 1000
 
     def test_attach_to_archived_session_is_not_immediately_closed(self, app_client, monkeypatch):
         """Opening an already-closed (archived) session is a deliberate
