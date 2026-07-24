@@ -467,7 +467,7 @@ async def ws_stream(ws: WebSocket, session_id: str):
         pass
 
 
-async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> tuple[int, str] | None:
+async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> int | None:
     """Bridge the browser's WS and the mind's pty-attach WS.
 
     Frame types are load-bearing on the browser→mind leg: BINARY frames
@@ -477,8 +477,8 @@ async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> tuple[int, str] | N
     first ends the bridge — a live pty and a browser tab have no
     independent life of their own once either end is gone.
 
-    Returns the mind's close code and reason when the mind is the end that
-    closed, so the caller can pass it through to the browser. That code is
+    Returns the mind's close code when the mind is the end that closed, so
+    the caller can pass it through to the browser. That code is
     the browser's only way to tell a socket it should stand down from one
     it should reconnect: a mind evicting a stale attach closes 1012, which
     tells that tile another window has the keyboard. Swallowed, it reads as
@@ -486,7 +486,7 @@ async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> tuple[int, str] | N
     the next one — a tug-of-war that repaints both terminals about once a
     second until a tab is closed.
     """
-    upstream_close: tuple[int, str] | None = None
+    upstream_close: int | None = None
 
     async def browser_to_mind() -> None:
         while True:
@@ -505,15 +505,15 @@ async def _pump_attach_ws(browser_ws: WebSocket, mind_ws) -> tuple[int, str] | N
                 await browser_ws.send_bytes(msg.data)
             elif msg.type == aiohttp.WSMsgType.TEXT:
                 await browser_ws.send_bytes(msg.data.encode())
-            else:  # CLOSE, CLOSED, ERROR
-                # A CLOSE frame carries the code in .data and the reason in
-                # .extra; CLOSED/ERROR arrive with the code already parked
-                # on the socket.
-                code = msg.data if msg.type == aiohttp.WSMsgType.CLOSE else mind_ws.close_code
-                reason = msg.extra if msg.type == aiohttp.WSMsgType.CLOSE else ""
-                if isinstance(code, int):
-                    upstream_close = (code, reason or "")
-                return
+            else:  # ERROR, and anything else the iterator does surface
+                break
+        # aiohttp's async iterator does not hand CLOSE frames to the loop —
+        # it stops on them — so the code is read off the socket afterwards,
+        # not out of a message. Iterating for it instead silently loses
+        # every close code the mind sends.
+        code = mind_ws.close_code
+        if isinstance(code, int):
+            upstream_close = code
 
     tasks = [asyncio.ensure_future(browser_to_mind()), asyncio.ensure_future(mind_to_browser())]
     try:
@@ -611,7 +611,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
                 elif pump in done:
                     upstream = pump.result()
                     if upstream is not None:
-                        await ws.close(code=upstream[0], reason=upstream[1])
+                        await ws.close(code=upstream)
     except aiohttp.WSServerHandshakeError as exc:
         # The mind answered, and said no. Starlette replies 403 to a
         # websocket path it has no route for, so this is how a mind whose

@@ -20,9 +20,16 @@ def _run(coro):
 
 
 class _FakeMindWS:
-    """Stands in for aiohttp's ClientWebSocketResponse."""
+    """Stands in for aiohttp's ClientWebSocketResponse.
 
-    def __init__(self, incoming: list[bytes] | None = None, close_with: tuple[int, str] | None = None):
+    Closing is modelled the way aiohttp actually behaves: a CLOSE frame is
+    never handed to `async for` — iteration simply ends and the code is
+    left on `.close_code`. A fake that yields a CLOSE message instead lets
+    a proxy that reads the code out of the message pass its tests and lose
+    every close code in production.
+    """
+
+    def __init__(self, incoming: list[bytes] | None = None, close_with: int | None = None):
         self._incoming = list(incoming or [])
         self._close_with = close_with
         self._block = asyncio.Event()
@@ -37,10 +44,9 @@ class _FakeMindWS:
             data = self._incoming.pop(0)
             return type("Msg", (), {"type": aiohttp.WSMsgType.BINARY, "data": data})()
         if self._close_with is not None:
-            code, reason = self._close_with
+            self.close_code = self._close_with
             self._close_with = None
-            self.close_code = code
-            return type("Msg", (), {"type": aiohttp.WSMsgType.CLOSE, "data": code, "extra": reason})()
+            raise StopAsyncIteration
         await self._block.wait()  # never set — blocks until the pump is cancelled
         raise StopAsyncIteration
 
@@ -247,7 +253,7 @@ class TestWsAttach:
         client, server_module = app_client
         _run(_seed_session_and_mind(server_module, session_id="sess-evicted"))
 
-        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"], close_with=(1012, "attached elsewhere"))
+        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"], close_with=1012)
         _FakeHttpSession.ws_to_return = fake_ws
         _FakeHttpSession.raise_on_connect = None
         monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
@@ -267,7 +273,7 @@ class TestWsAttach:
         client, server_module = app_client
         _run(_seed_session_and_mind(server_module, session_id="sess-exited"))
 
-        fake_ws = _FakeMindWS(incoming=[b"bye\r\n"], close_with=(1000, "terminal exited"))
+        fake_ws = _FakeMindWS(incoming=[b"bye\r\n"], close_with=1000)
         _FakeHttpSession.ws_to_return = fake_ws
         _FakeHttpSession.raise_on_connect = None
         monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
