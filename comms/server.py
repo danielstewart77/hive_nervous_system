@@ -659,6 +659,32 @@ async def route_command(body: CommandRequest):
         return {"error": "Internal server error"}
 
 
+async def _selectable(body: CommandRequest) -> list[dict]:
+    """The one list every command numbers against.
+
+    /sessions, /switch and /kill all take positions in it, so they have to
+    be reading the same list — numbering them separately is how "/switch 3"
+    lands on someone else's 3.
+    """
+    return await session_mgr.list_selectable_sessions(
+        owner_ref=body.owner_ref,
+        client_type=body.owner_type,
+        client_ref=body.client_ref,
+        mind_id=body.mind_id,
+    )
+
+
+async def _resolve_target(target: str, body: CommandRequest) -> tuple[str, dict | None]:
+    """A session id, or a position in the list the user was just shown."""
+    if not target.isdigit():
+        return target, None
+    sessions = await _selectable(body)
+    idx = int(target) - 1
+    if 0 <= idx < len(sessions):
+        return sessions[idx]["id"], None
+    return target, {"error": f"Invalid session number: {target}"}
+
+
 async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
 
     if cmd == "/status":
@@ -671,7 +697,7 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         }
 
     if cmd == "/sessions":
-        return await session_mgr.list_sessions(owner_ref=body.owner_ref)
+        return await _selectable(body)
 
     if cmd in ("/new", "/clear"):
         # Kill active session (if any), run memory pipeline on it, then create a new one.
@@ -706,30 +732,20 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
     if cmd == "/switch":
         if len(parts) < 2:
             return {"error": "Usage: /switch <session_id or number>"}
-        target = parts[1]
-        # If numeric, resolve from user's session list
-        if target.isdigit():
-            sessions = await session_mgr.list_sessions(owner_ref=body.owner_ref)
-            idx = int(target) - 1
-            if 0 <= idx < len(sessions):
-                target = sessions[idx]["id"]
-            else:
-                return {"error": f"Invalid session number: {target}"}
+        target, error = await _resolve_target(parts[1], body)
+        if error:
+            return error
         return await session_mgr.activate_session(
-            target, body.owner_type, body.client_ref
+            target, body.owner_type, body.client_ref,
+            owner_type=body.owner_type, owner_ref=body.owner_ref,
         )
 
     if cmd == "/kill":
         if len(parts) < 2:
             return {"error": "Usage: /kill <session_id or number>"}
-        target = parts[1]
-        if target.isdigit():
-            sessions = await session_mgr.list_sessions(owner_ref=body.owner_ref)
-            idx = int(target) - 1
-            if 0 <= idx < len(sessions):
-                target = sessions[idx]["id"]
-            else:
-                return {"error": f"Invalid session number: {target}"}
+        target, error = await _resolve_target(parts[1], body)
+        if error:
+            return error
         return await session_mgr.kill_session(target)
 
     if cmd == "/prune":
